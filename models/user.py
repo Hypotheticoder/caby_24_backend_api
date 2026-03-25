@@ -16,3 +16,4 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     orders = relationship("CustomerOrder", back_populates="user")
+    payments = relationship("Payment", back_populates="user")
