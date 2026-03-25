@@ -6,7 +6,6 @@ from datetime import datetime
 class UserBase(BaseModel):
     name: str
     phone: str
-    role: str
     email: Optional[str] = None
     photo_url: Optional[str] = None
 
@@ -18,7 +17,6 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
-    role: Optional[str] = None
     email: Optional[str] = None
     photo_url: Optional[str] = None
 

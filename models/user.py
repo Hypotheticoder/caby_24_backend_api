@@ -10,10 +10,9 @@ class User(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     name = Column(String, nullable=False)
-    email = Column(String, nullable=True)
+    email = Column(String, nullable=True) 
     phone = Column(String, nullable=False, unique=True)
-    photo_url = Column(String, nullable=True)
-    role = Column(String, nullable=False)
+    photo_url = Column(String, nullable=True) 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     orders = relationship("CustomerOrder", back_populates="user")
