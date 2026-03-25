@@ -1,0 +1,19 @@
+from datetime import datetime
+import uuid
+from sqlalchemy import Column, String, DateTime
+from database import Base
+from sqlalchemy.orm import relationship
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=True)
+    phone = Column(String, nullable=False, unique=True)
+    photo_url = Column(String, nullable=True)
+    role = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    orders = relationship("CustomerOrder", back_populates="user")
