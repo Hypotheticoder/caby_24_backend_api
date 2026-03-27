@@ -36,7 +36,18 @@ def update_payment(db: Session, db_payment: Payment, updates: PaymentUpdate):
     db.refresh(db_payment)
     return db_payment
 
+def get_payment_by_txnid(db: Session, txnid: str):
+    db_payment = db.query(Payment).filter(Payment.id == txnid).first()
+    if not db_payment:
+        db_payment = db.query(Payment).filter(Payment.transaction_id == txnid).first()
+    return db_payment
 
-def delete_payment(db: Session, db_payment: Payment):
-    db.delete(db_payment)
-    db.commit()
+def update_payment_status(db: Session, txnid: str, status: str):
+    db_payment = db.query(Payment).filter(Payment.id == txnid).first()
+    if not db_payment:
+        db_payment = db.query(Payment).filter(Payment.transaction_id == txnid).first()
+        
+    if db_payment:
+        db_payment.status = status
+        db.commit()
+    return db_payment

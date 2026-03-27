@@ -7,6 +7,10 @@ def get_user(db: Session, user_id: str):
     return db.query(User).filter(User.id == user_id).first()
 
 
+def get_user_by_phone(db: Session, phone: str):
+    return db.query(User).filter(User.phone == phone).first()
+
+
 def get_users(db: Session, skip: int = 0, limit: int = 100):
     return db.query(User).offset(skip).limit(limit).all()
 

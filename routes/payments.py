@@ -1,11 +1,80 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from typing import List
 from sqlalchemy.orm import Session
+import os
+import hashlib
 from database import get_db
-from schemas.payment import PaymentCreate, PaymentRead, PaymentUpdate
+from schemas.payment import PaymentCreate, PaymentRead, PaymentUpdate, PayUHashRequest, PayUHashResponse
 import crud.payment as crud_payment
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+@router.post("/generate-hash", response_model=PayUHashResponse)
+def generate_payu_hash(request: PayUHashRequest):
+    key = os.getenv("PAYU_MERCHANT_KEY", "")
+    salt = os.getenv("PAYU_MERCHANT_SALT", "")
+    
+    hash_sequence = f"{key}|{request.txnid}|{request.amount}|{request.productinfo}|{request.firstname}|{request.email}|{request.udf1}|{request.udf2}|{request.udf3}|{request.udf4}|{request.udf5}||||||{salt}"
+    hash_value = hashlib.sha512(hash_sequence.encode('utf-8')).hexdigest()
+    
+    return PayUHashResponse(hash=hash_value)
+
+@router.post("/callback")
+async def payu_callback(request: Request, db: Session = Depends(get_db)):
+    form_data = await request.form()
+    
+    status = form_data.get("status", "")
+    firstname = form_data.get("firstname", "")
+    amount = form_data.get("amount", "")
+    txnid = form_data.get("txnid", "")
+    posted_hash = form_data.get("hash", "")
+    key = form_data.get("key", "")
+    productinfo = form_data.get("productinfo", "")
+    email = form_data.get("email", "")
+    
+    udf1 = form_data.get("udf1", "")
+    udf2 = form_data.get("udf2", "")
+    udf3 = form_data.get("udf3", "")
+    udf4 = form_data.get("udf4", "")
+    udf5 = form_data.get("udf5", "")
+    additional_charges = form_data.get("additionalCharges")
+    
+    salt = os.getenv("PAYU_MERCHANT_SALT", "")
+    
+    if additional_charges:
+        reverse_hash_seq = f"{additional_charges}|{salt}|{status}||||||{udf5}|{udf4}|{udf3}|{udf2}|{udf1}|{email}|{firstname}|{productinfo}|{amount}|{txnid}|{key}"
+    else:
+        reverse_hash_seq = f"{salt}|{status}||||||{udf5}|{udf4}|{udf3}|{udf2}|{udf1}|{email}|{firstname}|{productinfo}|{amount}|{txnid}|{key}"
+        
+    calculated_hash = hashlib.sha512(reverse_hash_seq.encode('utf-8')).hexdigest()
+    
+    if calculated_hash == posted_hash:
+        print(f"Verified successful payment webhook for txnid: {txnid}")
+        
+        # 1. Fetch the original order from your DB
+        original_order = crud_payment.get_payment_by_txnid(db, txnid)
+        
+        # 2. Check the amount! (Convert both to float to be safe)
+        if original_order and float(original_order.amount) == float(amount):
+            # 🟢 ALL GOOD! Update DB
+            crud_payment.update_payment_status(db, txnid=txnid, status=status)
+        else:
+            # 🔴 FRAUD DETECTED!
+            print("Amount mismatch! User tampered with the price.")
+            crud_payment.update_payment_status(db, txnid=txnid, status="FAILED_AMOUNT_MISMATCH")
+            status = "failed"
+            
+    else:
+        print(f"Hash mismatch for txnid: {txnid} - POTENTIAL FRAUD")
+        # 🔴 Mark as failed/tampered in DB
+        crud_payment.update_payment_status(db, txnid=txnid, status="FAILED_TAMPERED")
+        status = "failed"
+        
+    if status.lower() == "success":
+        return RedirectResponse(url=f"bhukk://payment-success?txnid={txnid}")
+    else:
+        return RedirectResponse(url=f"bhukk://payment-failed?txnid={txnid}")
 
 
 @router.post("/create", response_model=PaymentRead)
@@ -32,12 +101,3 @@ def update_payment_endpoint(payment_id: str, updates: PaymentUpdate, db: Session
     if not db_payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     return crud_payment.update_payment(db, db_payment, updates)
-
-
-@router.delete("/{payment_id}", status_code=204)
-def delete_payment_endpoint(payment_id: str, db: Session = Depends(get_db)):
-    db_payment = crud_payment.get_payment(db, payment_id)
-    if not db_payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
-    crud_payment.delete_payment(db, db_payment)
-    return

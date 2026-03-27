@@ -30,3 +30,20 @@ class PaymentRead(PaymentBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PayUHashRequest(BaseModel):
+    txnid: str
+    amount: str
+    productinfo: str
+    firstname: str
+    email: str
+    udf1: Optional[str] = ""
+    udf2: Optional[str] = ""
+    udf3: Optional[str] = ""
+    udf4: Optional[str] = ""
+    udf5: Optional[str] = ""
+
+
+class PayUHashResponse(BaseModel):
+    hash: str
