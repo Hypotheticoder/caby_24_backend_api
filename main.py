@@ -5,6 +5,7 @@ from routes.users import router as users_router
 from routes.customer_orders import router as customer_orders_router
 from routes.payments import router as payments_router
 from routes.auth import router as auth_router
+from routes.delivery import router as delivery_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("parcel-backend")
@@ -14,6 +15,7 @@ app.include_router(users_router)
 app.include_router(customer_orders_router)
 app.include_router(payments_router)
 app.include_router(auth_router)
+app.include_router(delivery_router)
 
 
 @app.get("/", include_in_schema=False)
