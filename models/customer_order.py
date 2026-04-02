@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
 )
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
 
@@ -58,6 +59,21 @@ class CustomerOrder(Base):
 
     status = Column(String, default="pending", nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    encoded_polyline = Column(String, nullable=True)
+    
+    pickup_otp = Column(String, nullable=True)
+    drop_otp = Column(String, nullable=True)  
+
+    service_details = Column(JSONB, nullable=True) 
+
+    # ---------------------------------------------------------
+    # THE BRIDGE COLUMNS (Filled via Webhook from the Hub)
+    # ---------------------------------------------------------
+    hub_job_id = Column(String, nullable=True)
+    assigned_driver_id = Column(String, nullable=True) 
+    assigned_driver_name = Column(String, nullable=True)
+    assigned_driver_phone = Column(String, nullable=True)
 
     user = relationship("User", back_populates="orders")
     payments = relationship("Payment", back_populates="order")
