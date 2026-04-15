@@ -1,7 +1,6 @@
-import os
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from typing import List
+import json
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, WebSocket, WebSocketDisconnect
+from typing import List, Optional
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
 from schemas.customer_order import (
@@ -10,6 +9,35 @@ from schemas.customer_order import (
     CustomerOrderUpdate,
 )
 import crud.customer_order as crud_customer_order
+
+
+# Real-time tracking manager for customers watching an order
+class ParcelTrackingManager:
+    def __init__(self):
+        # Maps order_id -> list of active WebSocket connections
+        self.active_rooms: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, order_id: str):
+        await websocket.accept()
+        if order_id not in self.active_rooms:
+            self.active_rooms[order_id] = []
+        self.active_rooms[order_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, order_id: str):
+        if order_id in self.active_rooms and websocket in self.active_rooms[order_id]:
+            self.active_rooms[order_id].remove(websocket)
+
+    async def broadcast_to_order(self, order_id: str, message: dict):
+        if order_id in self.active_rooms:
+            for connection in list(self.active_rooms[order_id]):
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    self.disconnect(connection, order_id)
+
+
+parcel_ws_manager = ParcelTrackingManager()
+
 
 router = APIRouter(prefix="/customer_orders", tags=["customer_orders"])
 
@@ -47,41 +75,47 @@ async def create_customer_order_endpoint(
         }
     }
 
-    # 3. Fire the payload to the Driver Hub in background so client isn't blocked
-    hub_url = f"{os.getenv('DRIVER_HUB_URL')}/dispatch-jobs/create"
-    hub_secret = os.getenv("DRIVER_HUB_SECRET")
-
-    async def _post_to_hub(order_id: str, payload: dict, url: str, secret: str):
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(url, json=payload, headers={"x-hub-secret": secret}, timeout=5.0)
-                response.raise_for_status()
-                hub_response_data = response.json()
-                # Persist hub_job_id back to DB
-                db = SessionLocal()
-                try:
-                    from crud.customer_order import get_customer_order as _get
-                    db_order = db.query(__import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder).filter(
-                        __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder.id == order_id
-                    ).first()
-                    if db_order:
-                        db_order.hub_job_id = hub_response_data.get("hub_job_id")
-                        db.commit()
-                finally:
-                    db.close()
-                print("SUCCESS! Hub accepted the order (background task).")
-            except Exception as e:
-                print(f"Background hub post failed: {e}")
-
-    # schedule the background task (non-blocking)
-    background_tasks.add_task(_post_to_hub, str(db_order.id), hub_payload, hub_url, hub_secret)
+    # In the monolith we no longer post to an external Driver Hub.
+    # The driver app will query `/drivers/jobs/available` and accept jobs directly.
 
     return db_order
 
 
+@router.websocket("/ws/track/{order_id}")
+async def track_order_websocket(websocket: WebSocket, order_id: str):
+    await parcel_ws_manager.connect(websocket, order_id)
+    try:
+        while True:
+            # 1. Listen for incoming JSON from the Driver App
+            data = await websocket.receive_text()
+            parsed_data = json.loads(data)
+
+            # 2. Instantly bounce that JSON to the Customer App!
+            await parcel_ws_manager.broadcast_to_order(order_id, parsed_data)
+    except WebSocketDisconnect:
+        parcel_ws_manager.disconnect(websocket, order_id)
+
+
 @router.get("/list", response_model=List[CustomerOrderRead])
-def list_customer_orders(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return crud_customer_order.get_customer_orders(db, skip, limit)
+def list_customer_orders(
+    skip: int = 0,
+    limit: int = 100,  # 🔴 In Swagger UI, change this to 1000 if you have more than 100 rows!
+    status_filter: Optional[str] = Query(None, description="Filter by status (e.g., PENDING, ACCEPTED, DELIVERED)"),
+    db: Session = Depends(get_db),
+):
+    # Build a flexible query here so we can filter and order results
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    query = db.query(CustomerOrder)
+
+    if status_filter:
+        query = query.filter(CustomerOrder.status == status_filter)
+
+    return (
+        query.order_by(CustomerOrder.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 @router.get("/{order_id}", response_model=CustomerOrderRead)
@@ -110,33 +144,72 @@ def delete_customer_order_endpoint(order_id: str, db: Session = Depends(get_db))
 
 
 from pydantic import BaseModel
+from typing import Optional
 
-
+# 1. Upgraded Webhook Payload (Now accepts name and phone!)
 class HubStatusUpdate(BaseModel):
     status: str
-    driver_id: str | None = None
+    driver_id: Optional[str] = None
+    driver_name: Optional[str] = None
+    driver_phone: Optional[str] = None
 
-
+# 2. Upgraded Webhook Route
 @router.post("/{order_id}/hub-webhook", status_code=200)
 def receive_hub_update(
     order_id: str,
     payload: HubStatusUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """
     The Driver Hub will call this endpoint when the driver
     accepts, picks up, or delivers the parcel.
     """
-    db_order = crud_customer_order.get_customer_order(db, order_id)
-    if not db_order:
-        raise HTTPException(status_code=404, detail="Order not found")
+    # Check if the Hub sent an "ACCEPTED" status with driver details
+    if payload.status == "ACCEPTED" and payload.driver_id:
 
-    db_order.status = payload.status
-    if payload.driver_id:
-        db_order.assigned_driver_id = payload.driver_id
+        # Call CRUD helper to assign the driver
+        updated_order = crud_customer_order.assign_driver_to_order(
+            db=db,
+            order_id=order_id,
+            driver_id=payload.driver_id,
+            driver_name=payload.driver_name or "Unknown Driver",
+            driver_phone=payload.driver_phone or "N/A",
+        )
 
-    db.commit()
-    db.refresh(db_order)
+        if not updated_order:
+            raise HTTPException(status_code=404, detail="Order not found in Parcel DB")
 
-    print(f"🔄 Parcel Order {order_id} updated to {payload.status} by the Hub!")
-    return {"message": "Update received"}
+        # Broadcast to any connected customers watching this order (non-blocking)
+        background_tasks.add_task(
+            parcel_ws_manager.broadcast_to_order,
+            order_id,
+            {
+                "event": "DRIVER_ASSIGNED",
+                "assigned_driver_name": updated_order.assigned_driver_name,
+                "assigned_driver_phone": updated_order.assigned_driver_phone,
+                "pickup_otp": updated_order.pickup_otp,
+                    "drop_otp": updated_order.drop_otp,
+                "status": "ACCEPTED",
+            },
+        )
+
+        print(f"✅ Parcel Order {order_id} was just accepted by {payload.driver_name}!")
+
+    else:
+        # If it's just a standard status update (like "DELIVERED"), just update the status
+        db_order = crud_customer_order.get_customer_order(db, order_id)
+        if not db_order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        db_order.status = payload.status
+        db.commit()
+
+        # Notify watchers of status change
+        background_tasks.add_task(
+            parcel_ws_manager.broadcast_to_order,
+            order_id,
+            {"event": "STATUS_UPDATE", "status": payload.status},
+        )
+
+    return {"message": "Webhook successfully saved to Parcel Database"}

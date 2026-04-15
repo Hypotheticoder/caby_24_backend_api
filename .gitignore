@@ -54,3 +54,4 @@ uploads/
 
 # macOS
 .DS_Store
+service-account.json

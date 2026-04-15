@@ -7,3 +7,5 @@ python-dotenv
 pydantic
 requests
 httpx
+firebase-admin
+python-multipart
