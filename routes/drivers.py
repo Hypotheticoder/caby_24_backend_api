@@ -252,6 +252,11 @@ def update_job_status(
         if db_order.pickup_otp and payload.otp != db_order.pickup_otp:
             raise HTTPException(status_code=400, detail="Invalid pickup OTP")
 
+    # If marking DELIVERED, validate drop-off OTP if present on order
+    elif payload.status == "DELIVERED":
+        if db_order.drop_otp and payload.otp != db_order.drop_otp:
+            raise HTTPException(status_code=400, detail="Invalid drop-off OTP")
+
     db_order.status = payload.status
     db.commit()
 
