@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import logging
 from database import engine, Base
 from routes.users import router as users_router
@@ -13,6 +14,10 @@ from routes.webhooks import router as webhooks_router
 from routes.drivers import router as drivers_router
 
 logging.basicConfig(level=logging.INFO)
+
+# Avoid logging full request URLs (which may contain secrets like API keys).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger("parcel-backend")
 
 app = FastAPI(title="Parcel Backend")
@@ -24,6 +29,12 @@ app.include_router(delivery_router)
 app.include_router(webhooks_router)
 app.include_router(drivers_router)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/", include_in_schema=False)
 def read_root():
