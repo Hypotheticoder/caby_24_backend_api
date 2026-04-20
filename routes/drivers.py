@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import json
 
 from fastapi import (
@@ -270,18 +271,39 @@ def update_job_status(
 
 
 @router.websocket("/ws/location/{order_id}")
-async def driver_location_ws(websocket: WebSocket, order_id: str):
+async def driver_location_ws(
+    websocket: WebSocket,
+    order_id: str,
+    db: Session = Depends(get_db),
+):
     await websocket.accept()
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
+    if not db_order:
+        print("Order not found, closing socket")
+        await websocket.close()
+        return
+
     try:
         while True:
             data = await websocket.receive_text()
             try:
                 obj = json.loads(data)
-            except Exception:
-                # ignore malformed pings
-                continue
-            # Expecting {"lat": ..., "lng": ...}
-            await parcel_ws_manager.broadcast_to_order(order_id, {"event": "LOCATION_UPDATE", **obj})
+                if isinstance(obj, dict) and "lat" in obj and "lng" in obj:
+                    # Update the model instance
+                    db_order.assigned_driver_lat = float(obj.get("lat"))
+                    db_order.assigned_driver_lng = float(obj.get("lng"))
+                    db_order.last_location_update = datetime.utcnow()
+
+                    db.commit()
+                    print(f"✅ DB UPDATED: {obj.get('lat')}, {obj.get('lng')}")
+            except Exception as e:
+                # This will tell you EXACTLY what is wrong.
+                print(f"❌ DATABASE UPDATE FAILED: {e}")
+                db.rollback()
+
+            if isinstance(obj, dict):
+                await parcel_ws_manager.broadcast_to_order(order_id, {"event": "LOCATION_UPDATE", **obj})
     except WebSocketDisconnect:
         return
 

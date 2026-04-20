@@ -1,6 +1,7 @@
 from datetime import datetime
 import uuid
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
+from sqlalchemy.orm import relationship
 
 from database import Base
 
@@ -41,5 +42,7 @@ class Driver(Base):
 
     rating = Column(Float, nullable=False, default=0.0)
     total_deliveries = Column(Integer, nullable=False, default=0)
+
+    assigned_orders = relationship("CustomerOrder", back_populates="driver")
 
 

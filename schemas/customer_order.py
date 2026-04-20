@@ -88,9 +88,12 @@ class CustomerOrderRead(CustomerOrderBase):
     drop_otp: Optional[str] = None
     service_details: Optional[Any] = None
 
-    hub_job_id: Optional[str] = None
     assigned_driver_id: Optional[str] = None
     assigned_driver_name: Optional[str] = None
     assigned_driver_phone: Optional[str] = None
+
+    assigned_driver_lat: Optional[float] = None
+    assigned_driver_lng: Optional[float] = None
+    last_location_update: Optional[datetime] = None
 
     model_config = {"from_attributes": True}

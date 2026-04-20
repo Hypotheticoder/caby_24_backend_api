@@ -68,12 +68,17 @@ class CustomerOrder(Base):
     service_details = Column(JSONB, nullable=True) 
 
     # ---------------------------------------------------------
-    # THE BRIDGE COLUMNS (Filled via Webhook from the Hub)
+    # DRIVER ASSIGNMENT (Order is the job)
     # ---------------------------------------------------------
-    hub_job_id = Column(String, nullable=True)
-    assigned_driver_id = Column(String, nullable=True) 
+    assigned_driver_id = Column(String, ForeignKey("drivers.id"), nullable=True)
     assigned_driver_name = Column(String, nullable=True)
     assigned_driver_phone = Column(String, nullable=True)
 
+    # Last known driver position for this order
+    assigned_driver_lat = Column(Float, nullable=True)
+    assigned_driver_lng = Column(Float, nullable=True)
+    last_location_update = Column(DateTime, nullable=True)
+
     user = relationship("User", back_populates="orders")
+    driver = relationship("Driver", back_populates="assigned_orders")
     payments = relationship("Payment", back_populates="order")
