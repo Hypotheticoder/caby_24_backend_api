@@ -23,4 +23,4 @@ RUN mkdir -p /app/uploads /app/assets
 EXPOSE 8017
 
 # Run migrations, then start the API server
-CMD ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8017"]
+CMD ["sh", "-c", "python scripts/wait_for_db.py && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8017"]

@@ -9,7 +9,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     networks:
-      - parcel&cab_backend_net
+      - caby24_backend_net
 
   pgadmin:
     image: dpage/pgadmin4
@@ -28,7 +28,7 @@ services:
     depends_on:
       - db
     networks:
-      - parcel&cab_backend_net
+      - caby24_backend_net
 
   backend:
     build:
@@ -42,7 +42,7 @@ services:
     depends_on:
       - db
     networks:
-      - parcel&cab_backend_net
+      - caby24_backend_net
     volumes:
       - uploads_data:/app/uploads
 
@@ -52,5 +52,5 @@ volumes:
 
 
 networks:
-  parcel&cab_backend_net:
+  caby24_backend_net:
     driver: bridge
