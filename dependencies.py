@@ -6,26 +6,42 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 
-def verify_firebase_token(authorization: Optional[str] = Header(None)) -> dict:
+security = HTTPBearer(auto_error=False)
+
+
+def verify_firebase_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    authorization: Optional[str] = Header(None),
+) -> dict:
     """Verify Firebase ID token.
 
-    Expects `Authorization: Bearer <firebase_id_token>`.
+    Expected header: `Authorization: Bearer <firebase_id_token>`.
 
-    Requires `firebase-admin` and a configured service account.
-    Set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account JSON path.
+    Notes:
+    - Uses `HTTPBearer` parsing (preferred) and falls back to raw header parsing.
+    - Set `AUTH_DEBUG=1` to print diagnostic logs (token prefix + exact verify error).
+    - Requires `firebase-admin` and a configured service account.
+      Set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account JSON path.
     """
 
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+    token: Optional[str] = None
+    if credentials is not None:
+        token = (credentials.credentials or "").strip()
+    elif authorization:
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+        token = authorization.split(" ", 1)[1].strip()
 
-    token = authorization.split(" ", 1)[1].strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if os.getenv("AUTH_DEBUG") == "1":
+        prefix = token[:15]
+        print(f"🔥 RECEIVED TOKEN: {prefix}... (Length: {len(token)})")
 
     # Dev-only escape hatch: allow running the app without Firebase Admin credentials.
     # WARNING: Do not enable this in production.
@@ -89,14 +105,17 @@ def verify_firebase_token(authorization: Optional[str] = Header(None)) -> dict:
     except auth.InvalidIdTokenError as e:
         # Most common causes: wrong Firebase project credentials, malformed token.
         if os.getenv("AUTH_DEBUG") == "1":
+            print(f"❌ FIREBASE VERIFICATION FAILED: {str(e)}")
             raise HTTPException(status_code=401, detail=f"Invalid authentication credentials: {e}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
     except auth.CertificateFetchError as e:
         # Backend cannot fetch Google's public keys (network/DNS). Treat as transient.
         if os.getenv("AUTH_DEBUG") == "1":
+            print(f"❌ FIREBASE VERIFICATION FAILED: {str(e)}")
             raise HTTPException(status_code=503, detail=f"Firebase key fetch failed: {e}")
         raise HTTPException(status_code=503, detail="Firebase key fetch failed")
     except Exception as e:
         if os.getenv("AUTH_DEBUG") == "1":
+            print(f"❌ FIREBASE VERIFICATION FAILED: {str(e)}")
             raise HTTPException(status_code=401, detail=f"Invalid authentication credentials: {e}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
