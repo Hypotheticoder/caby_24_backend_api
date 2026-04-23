@@ -8,6 +8,7 @@ from database import engine, Base
 from routes.users import router as users_router
 from routes.customer_orders import router as customer_orders_router
 from routes.payments import router as payments_router
+from routes.admin_earnings import router as admin_earnings_router
 from routes.auth import router as auth_router
 from routes.delivery import router as delivery_router
 from routes.webhooks import router as webhooks_router
@@ -24,6 +25,7 @@ app = FastAPI(title="Parcel Backend")
 app.include_router(users_router)
 app.include_router(customer_orders_router)
 app.include_router(payments_router)
+app.include_router(admin_earnings_router)
 app.include_router(auth_router)
 app.include_router(delivery_router)
 app.include_router(webhooks_router)

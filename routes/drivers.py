@@ -169,7 +169,10 @@ def get_current_driver(decoded_token: dict = Depends(verify_firebase_token), db:
     DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
     driver = db.query(DriverModel).filter(DriverModel.firebase_uid == uid).first()
     if not driver:
-        raise HTTPException(status_code=404, detail="Driver not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Driver profile not found. Call POST /drivers/create first.",
+        )
     return driver
 
 
@@ -179,15 +182,24 @@ class StatusUpdate(BaseModel):
 
 
 @router.get("/jobs/available", response_model=list[CustomerOrderRead])
-def available_jobs(current_driver=Depends(get_current_driver), db: Session = Depends(get_db)):
+def available_jobs(
+    skip: int = 0,
+    limit: int = 100,
+    type_filter: Optional[str] = Query(None, description="Filter by order_type (e.g., ride, parcel)"),
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
-    # Be tolerant of legacy lowercase status values.
-    orders = (
-        db.query(CustomerOrder)
-        .filter(CustomerOrder.status.in_(["PENDING", "pending"]))
+    query = db.query(CustomerOrder).filter(CustomerOrder.status.in_(["PENDING", "pending"]))
+    if type_filter:
+        query = query.filter(CustomerOrder.order_type == type_filter)
+
+    return (
+        query.order_by(CustomerOrder.created_at.desc())
+        .offset(skip)
+        .limit(limit)
         .all()
     )
-    return orders
 
 
 @router.post("/jobs/{order_id}/accept")

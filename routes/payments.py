@@ -1,24 +1,64 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from typing import List
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import os
 import hashlib
 from database import get_db
-from schemas.payment import PaymentCreate, PaymentRead, PaymentUpdate, PayUHashRequest, PayUHashResponse
+from schemas.payment import PaymentCreate, PaymentRead, PaymentUpdate
 import crud.payment as crud_payment
+from models.customer_order import CustomerOrder
+from models.payment import Payment
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
-@router.post("/generate-hash", response_model=PayUHashResponse)
-def generate_payu_hash(request: PayUHashRequest):
+class InitPayURequest(BaseModel):
+    order_id: str
+
+
+@router.post("/init-payu")
+def initialize_payu(request: InitPayURequest, db: Session = Depends(get_db)):
+    order = db.query(CustomerOrder).filter(CustomerOrder.id == request.order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
     key = os.getenv("PAYU_MERCHANT_KEY", "")
     salt = os.getenv("PAYU_MERCHANT_SALT", "")
-    
-    hash_sequence = f"{key}|{request.txnid}|{request.amount}|{request.productinfo}|{request.firstname}|{request.email}|{request.udf1}|{request.udf2}|{request.udf3}|{request.udf4}|{request.udf5}||||||{salt}"
-    hash_value = hashlib.sha512(hash_sequence.encode('utf-8')).hexdigest()
-    
-    return PayUHashResponse(hash=hash_value)
+
+    txnid = f"TXN_{order.id[:10].upper()}"
+    amount = float(order.total_fare)
+    productinfo = order.id
+    firstname = order.user_id
+    email = "customer@bhukk.com"
+
+    hash_sequence = f"{key}|{txnid}|{amount}|{productinfo}|{firstname}|{email}|||||||||||{salt}"
+    hash_value = hashlib.sha512(hash_sequence.encode("utf-8")).hexdigest()
+
+    # Create a pending payment record if one doesn't exist for this txnid.
+    existing = db.query(Payment).filter(Payment.transaction_id == txnid).first()
+    if not existing:
+        db_payment = Payment(
+            order_id=order.id,
+            user_id=order.user_id,
+            amount=amount,
+            payment_method="payu",
+            payment_type="full",
+            transaction_id=txnid,
+            status="pending",
+        )
+        db.add(db_payment)
+        db.commit()
+
+    return {
+        "hash": hash_value,
+        "txnid": txnid,
+        "amount": amount,
+        "key": key,
+        "productinfo": productinfo,
+        "firstname": firstname,
+        "email": email,
+    }
 
 @router.post("/callback")
 async def payu_callback(request: Request, db: Session = Depends(get_db)):

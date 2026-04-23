@@ -40,8 +40,25 @@ class CustomerOrderBase(BaseModel):
     status: Optional[str] = "pending"
 
 
-class CustomerOrderCreate(CustomerOrderBase):
-    pass
+class CustomerOrderCreate(BaseModel):
+    user_id: str
+    order_type: str
+    vehicle_type: str  # "bike", "cab", etc.
+    distance_km: float  # Backend needs this for math!
+
+    pickup_address: str
+    pickup_lat: float
+    pickup_lng: float
+    pickup_contact_name: Optional[str] = None
+    pickup_contact_phone: Optional[str] = None
+
+    drop_address: str
+    drop_lat: float
+    drop_lng: float
+    drop_contact_name: Optional[str] = None
+    drop_contact_phone: Optional[str] = None
+
+    payment_method: str
 
 
 class CustomerOrderUpdate(BaseModel):
@@ -65,10 +82,6 @@ class CustomerOrderUpdate(BaseModel):
     instructions: Optional[str] = None
 
     vehicle_type: Optional[str] = None
-    base_fare: Optional[float] = None
-    distance_km: Optional[float] = None
-    distance_charge: Optional[float] = None
-    total_fare: Optional[float] = None
 
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
@@ -82,6 +95,8 @@ class CustomerOrderUpdate(BaseModel):
 class CustomerOrderRead(CustomerOrderBase):
     id: str
     created_at: datetime
+
+    driver_payout: Optional[float] = None
 
     encoded_polyline: Optional[str] = None
     pickup_otp: Optional[str] = None
@@ -97,3 +112,18 @@ class CustomerOrderRead(CustomerOrderBase):
     last_location_update: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+# --- FARE ESTIMATE SCHEMAS ---
+
+class FareEstimateRequest(BaseModel):
+    service_type: str
+    distance_km: float
+
+class FareEstimateResponse(BaseModel):
+    is_peak_time: bool
+    base_fare: float
+    per_km_rate: float
+    distance_charge: float
+    minimum_fare_applied: bool
+    total_fare: float    

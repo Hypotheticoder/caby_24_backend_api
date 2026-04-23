@@ -20,12 +20,32 @@ def get_customer_orders(db: Session, skip: int = 0, limit: int = 100):
     return db.query(CustomerOrder).offset(skip).limit(limit).all()
 
 
-def create_customer_order(db: Session, order: CustomerOrderCreate):
-    # support Pydantic v2 (`model_dump`) and v1 (`dict`)
+def create_customer_order(
+    db: Session,
+    order: CustomerOrderCreate,
+    secure_base_fare: float,
+    secure_distance_charge: float,
+    secure_total_fare: float,
+    secure_driver_payout: float,
+):
+    # Convert Pydantic model to dictionary
     if hasattr(order, "model_dump"):
         data = order.model_dump()
     else:
         data = order.dict()
+
+    # 🔒 THE SECURITY LOCK: Force the backend prices
+    data["base_fare"] = secure_base_fare
+    data["distance_charge"] = secure_distance_charge
+    data["total_fare"] = secure_total_fare
+    data["driver_payout"] = secure_driver_payout
+    data["status"] = "pending"
+    data["payment_status"] = "pending"
+
+    # 🔐 Generate OTPs
+    data["pickup_otp"] = _generate_otp()
+    data["drop_otp"] = _generate_otp()
+
     db_order = CustomerOrder(**data)
     db.add(db_order)
     db.commit()

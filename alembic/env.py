@@ -14,6 +14,8 @@ from database import Base
 import models.user
 import models.customer_order
 import models.payment
+import models.earnings_config
+import models.driver
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

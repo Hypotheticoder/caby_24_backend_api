@@ -3,12 +3,15 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, W
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
+from datetime import datetime
 from schemas.customer_order import (
     CustomerOrderCreate,
     CustomerOrderRead,
     CustomerOrderUpdate,
 )
+from schemas.customer_order import FareEstimateRequest, FareEstimateResponse
 import crud.customer_order as crud_customer_order
+from models.earnings_config import EarningsConfig
 
 
 # Real-time tracking manager for customers watching an order
@@ -42,14 +45,77 @@ parcel_ws_manager = ParcelTrackingManager()
 router = APIRouter(prefix="/customer_orders", tags=["customer_orders"])
 
 
+def is_currently_peak_time() -> bool:
+    current_hour = datetime.now().hour
+    return (7 <= current_hour < 11) or (17 <= current_hour < 22)
+
+
+# --- ROUTE: CALCULATE FARE (Flutter calls this when user selects destination) ---
+@router.post("/calculate-fare", response_model=FareEstimateResponse)
+def calculate_fare_endpoint(request: FareEstimateRequest, db: Session = Depends(get_db)):
+    peak_status = is_currently_peak_time()
+
+    config = db.query(EarningsConfig).filter(
+        EarningsConfig.service_type == request.service_type.lower(),
+        EarningsConfig.is_peak_time == peak_status
+    ).first()
+
+    if not config:
+        raise HTTPException(status_code=400, detail="Pricing not found for this vehicle.")
+
+    # Calculate exact math
+    distance_charge = request.distance_km * config.per_km_rate
+    raw_fare = config.base_fare + distance_charge
+    final_fare = max(raw_fare, config.minimum_fare)
+
+    return FareEstimateResponse(
+        is_peak_time=peak_status,
+        base_fare=config.base_fare,
+        per_km_rate=config.per_km_rate,
+        distance_charge=distance_charge,
+        minimum_fare_applied=(final_fare == config.minimum_fare),
+        total_fare=final_fare
+    )
+
+
 @router.post("/create", response_model=CustomerOrderRead)
 async def create_customer_order_endpoint(
     order: CustomerOrderCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    # 1. Save it to your local Parcel Database first (Your existing code)
-    db_order = crud_customer_order.create_customer_order(db, order)
+    # 1. Fetch the exact price from admin-configured rules
+    peak_status = is_currently_peak_time()
+    config = (
+        db.query(EarningsConfig)
+        .filter(
+            EarningsConfig.service_type == order.vehicle_type.lower(),
+            EarningsConfig.is_peak_time == peak_status,
+        )
+        .first()
+    )
+
+    if not config:
+        raise HTTPException(status_code=400, detail="Pricing not found for this vehicle.")
+
+    # 2. Do the exact math securely on the backend
+    secure_base_fare = float(config.base_fare)
+    secure_distance_charge = float(order.distance_km) * float(config.per_km_rate)
+    raw_fare = secure_base_fare + secure_distance_charge
+    secure_total_fare = max(raw_fare, float(config.minimum_fare))
+
+    # Driver gets the locked payout for this order (fare - platform commission)
+    secure_driver_payout = max(0.0, secure_total_fare - float(config.platform_commission))
+
+    # 3. Save to DB with backend-forced prices + OTPs
+    db_order = crud_customer_order.create_customer_order(
+        db,
+        order,
+        secure_base_fare=secure_base_fare,
+        secure_distance_charge=secure_distance_charge,
+        secure_total_fare=secure_total_fare,
+        secure_driver_payout=secure_driver_payout,
+    )
 
     # 2. Package the data for the Driver Hub
     # Notice how we bundle your specific parcel details into the 'requirements' dictionary!

@@ -50,6 +50,9 @@ class CustomerOrder(Base):
     distance_charge = Column(Float, nullable=False)
     total_fare = Column(Float, nullable=False)
 
+    # Driver's exact cut locked at order creation time
+    driver_payout = Column(Float, nullable=True)
+
     # 5. Payment & Status
     payment_method = Column(String, nullable=False)  # "online" or "cod"
     payment_status = Column(String, default="pending")
