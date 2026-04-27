@@ -3,6 +3,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import logging
 from database import engine, Base
 from routes.users import router as users_router
@@ -13,6 +14,7 @@ from routes.auth import router as auth_router
 from routes.delivery import router as delivery_router
 from routes.webhooks import router as webhooks_router
 from routes.drivers import router as drivers_router
+from routes import global_timing
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,6 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("parcel-backend")
 
 app = FastAPI(title="Parcel Backend")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.include_router(users_router)
 app.include_router(customer_orders_router)
 app.include_router(payments_router)
@@ -30,6 +33,7 @@ app.include_router(auth_router)
 app.include_router(delivery_router)
 app.include_router(webhooks_router)
 app.include_router(drivers_router)
+app.include_router(global_timing.router)
 
 app.add_middleware(
     CORSMiddleware,

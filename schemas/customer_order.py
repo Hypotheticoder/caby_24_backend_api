@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, Any
+from pydantic import BaseModel, ConfigDict
+from typing import Optional, Any, List
 from datetime import datetime
 
 
@@ -127,3 +127,21 @@ class FareEstimateResponse(BaseModel):
     distance_charge: float
     minimum_fare_applied: bool
     total_fare: float    
+
+
+# --- ALL VEHICLE FARES (Uber/Rapido-style list) ---
+
+# Flutter only needs to send the distance now!
+class AllFaresRequest(BaseModel):
+    distance_km: float
+
+
+# The breakdown for a single vehicle in the list
+class VehicleFareItem(BaseModel):
+    service_type: str
+    base_fare: float
+    per_km_rate: float
+    total_fare: float
+    is_peak_time: bool
+
+    model_config = ConfigDict(from_attributes=True)

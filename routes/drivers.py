@@ -75,7 +75,9 @@ def driver_phone_exists(
         raise HTTPException(status_code=400, detail="phone_number is required")
 
     driver = get_driver_by_phone_number(db, normalized)
-    return {"exists": driver is not None}
+    if driver:
+        return {"exists": True, "driver_id": str(driver.id)}
+    return {"exists": False}
 
 
 @router.get("/{driver_id}", response_model=DriverRead)

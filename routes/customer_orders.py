@@ -9,7 +9,12 @@ from schemas.customer_order import (
     CustomerOrderRead,
     CustomerOrderUpdate,
 )
-from schemas.customer_order import FareEstimateRequest, FareEstimateResponse
+from schemas.customer_order import (
+    FareEstimateRequest,
+    FareEstimateResponse,
+    AllFaresRequest,
+    VehicleFareItem,
+)
 import crud.customer_order as crud_customer_order
 from models.earnings_config import EarningsConfig
 
@@ -45,15 +50,34 @@ parcel_ws_manager = ParcelTrackingManager()
 router = APIRouter(prefix="/customer_orders", tags=["customer_orders"])
 
 
-def is_currently_peak_time() -> bool:
+def is_currently_peak_time(db: Session) -> bool:
+    # 🚨 Pointing to the new file instead of earnings_config!
+    GlobalTiming = __import__("models.global_timing", fromlist=["GlobalTiming"]).GlobalTiming
+    timing = db.query(GlobalTiming).filter(GlobalTiming.id == "master").first()
+
+    if not timing:
+        return False
+
+    if timing.manual_peak_override is not None:
+        return timing.manual_peak_override
+
     current_hour = datetime.now().hour
-    return (7 <= current_hour < 11) or (17 <= current_hour < 22)
+
+    is_morning = timing.morning_start <= current_hour < timing.morning_end
+    is_evening = timing.evening_start <= current_hour < timing.evening_end
+
+    if timing.night_start > timing.night_end:
+        is_night = current_hour >= timing.night_start or current_hour < timing.night_end
+    else:
+        is_night = timing.night_start <= current_hour < timing.night_end
+
+    return is_morning or is_evening or is_night
 
 
 # --- ROUTE: CALCULATE FARE (Flutter calls this when user selects destination) ---
 @router.post("/calculate-fare", response_model=FareEstimateResponse)
 def calculate_fare_endpoint(request: FareEstimateRequest, db: Session = Depends(get_db)):
-    peak_status = is_currently_peak_time()
+    peak_status = is_currently_peak_time(db)
 
     config = db.query(EarningsConfig).filter(
         EarningsConfig.service_type == request.service_type.lower(),
@@ -78,6 +102,40 @@ def calculate_fare_endpoint(request: FareEstimateRequest, db: Session = Depends(
     )
 
 
+@router.post("/calculate-all-fares", response_model=List[VehicleFareItem])
+def calculate_all_fares_endpoint(request: AllFaresRequest, db: Session = Depends(get_db)):
+    # 1. Ask the Master Clock if it is peak time
+    peak_status = is_currently_peak_time(db)
+
+    # 2. Grab EVERY vehicle from the menu that matches the current peak status
+    configs = db.query(EarningsConfig).filter(EarningsConfig.is_peak_time == peak_status).all()
+
+    if not configs:
+        raise HTTPException(status_code=400, detail="No active vehicles found.")
+
+    # 3. Calculate the math for every single vehicle
+    available_rides = []
+    for config in configs:
+        distance_charge = request.distance_km * config.per_km_rate
+        raw_fare = config.base_fare + distance_charge
+
+        actual_total = max(raw_fare, config.minimum_fare)
+
+        # 4. Add this vehicle to the list
+        available_rides.append(
+            {
+                "service_type": config.service_type,  # e.g., "ac_cab", "premium_bike"
+                "base_fare": config.base_fare,
+                "per_km_rate": config.per_km_rate,
+                "total_fare": actual_total,
+                "is_peak_time": peak_status,
+            }
+        )
+
+    # 5. Send the massive list back to Flutter!
+    return available_rides
+
+
 @router.post("/create", response_model=CustomerOrderRead)
 async def create_customer_order_endpoint(
     order: CustomerOrderCreate,
@@ -85,7 +143,7 @@ async def create_customer_order_endpoint(
     db: Session = Depends(get_db),
 ):
     # 1. Fetch the exact price from admin-configured rules
-    peak_status = is_currently_peak_time()
+    peak_status = is_currently_peak_time(db)
     config = (
         db.query(EarningsConfig)
         .filter(
