@@ -9,10 +9,18 @@ def get_earnings_config(db: Session, config_id: str):
     return db.query(EarningsConfig).filter(EarningsConfig.id == config_id).first()
 
 def update_earnings_config(db: Session, db_config: EarningsConfig, updates: EarningsConfigUpdateRequest):
-    db_config.base_fare = updates.base_fare
-    db_config.per_km_rate = updates.per_km_rate
-    db_config.minimum_fare = updates.minimum_fare
-    db_config.platform_commission = updates.platform_commission
+    # Automatically apply only fields the Admin actually sent.
+    # Pydantic v2: model_dump(); v1 fallback: dict().
+    if hasattr(updates, "model_dump"):
+        update_data = updates.model_dump(exclude_unset=True)
+    else:
+        update_data = updates.dict(exclude_unset=True)
+
+    # Ignore explicit nulls to avoid overwriting NOT NULL DB columns.
+    for key, value in update_data.items():
+        if value is None:
+            continue
+        setattr(db_config, key, value)
 
     db.commit()
     db.refresh(db_config)
@@ -26,8 +34,17 @@ def create_earnings_config(db: Session, config_in: EarningsConfigBase):
         base_fare=config_in.base_fare,
         per_km_rate=config_in.per_km_rate,
         minimum_fare=config_in.minimum_fare,
-        platform_commission=config_in.platform_commission
+        platform_commission=config_in.platform_commission,
     )
+
+    # Optional fields: only set if provided; otherwise DB/model defaults apply.
+    if getattr(config_in, "max_weight_kg", None) is not None:
+        db_config.max_weight_kg = config_in.max_weight_kg
+    if getattr(config_in, "max_distance_km", None) is not None:
+        db_config.max_distance_km = config_in.max_distance_km
+    if getattr(config_in, "pickup_radius_km", None) is not None:
+        db_config.pickup_radius_km = config_in.pickup_radius_km
+
     db.add(db_config)
     db.commit()
     db.refresh(db_config)

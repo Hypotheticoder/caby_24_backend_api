@@ -17,6 +17,8 @@ from schemas.customer_order import (
 )
 import crud.customer_order as crud_customer_order
 from models.earnings_config import EarningsConfig
+from dependencies import get_current_user
+from models.user import User
 
 
 # Real-time tracking manager for customers watching an order
@@ -104,35 +106,48 @@ def calculate_fare_endpoint(request: FareEstimateRequest, db: Session = Depends(
 
 @router.post("/calculate-all-fares", response_model=List[VehicleFareItem])
 def calculate_all_fares_endpoint(request: AllFaresRequest, db: Session = Depends(get_db)):
-    # 1. Ask the Master Clock if it is peak time
     peak_status = is_currently_peak_time(db)
 
-    # 2. Grab EVERY vehicle from the menu that matches the current peak status
-    configs = db.query(EarningsConfig).filter(EarningsConfig.is_peak_time == peak_status).all()
+    # 🚨 THE MAGIC SLICE & VALIDATION 🚨
+    if request.is_parcel:
+        # SCENARIO A: User is sending a Parcel
+        # 1. Only grab 'parcel_' vehicles.
+        # 2. Block any vehicle where the max_weight_kg is less than the user's package weight.
+        configs = db.query(EarningsConfig).filter(
+            EarningsConfig.is_peak_time == peak_status,
+            EarningsConfig.service_type.like("parcel_%"),
+            EarningsConfig.max_weight_kg >= request.weight_kg,
+            EarningsConfig.max_distance_km >= request.distance_km
+        ).all()
+    else:
+        # SCENARIO B: User is booking a normal Ride
+        # Hide all the parcel trucks!
+        configs = db.query(EarningsConfig).filter(
+            EarningsConfig.is_peak_time == peak_status,
+            EarningsConfig.service_type.notlike("parcel_%"),
+            EarningsConfig.max_distance_km >= request.distance_km
+        ).all()
 
     if not configs:
-        raise HTTPException(status_code=400, detail="No active vehicles found.")
+        raise HTTPException(status_code=400, detail="No vehicles available for this request.")
 
-    # 3. Calculate the math for every single vehicle
     available_rides = []
     for config in configs:
         distance_charge = request.distance_km * config.per_km_rate
         raw_fare = config.base_fare + distance_charge
-
         actual_total = max(raw_fare, config.minimum_fare)
 
-        # 4. Add this vehicle to the list
         available_rides.append(
             {
-                "service_type": config.service_type,  # e.g., "ac_cab", "premium_bike"
+                "service_type": config.service_type,
                 "base_fare": config.base_fare,
                 "per_km_rate": config.per_km_rate,
                 "total_fare": actual_total,
                 "is_peak_time": peak_status,
+                "max_weight": config.max_weight_kg, # 👈 Pass it back to Flutter
             }
         )
 
-    # 5. Send the massive list back to Flutter!
     return available_rides
 
 
@@ -140,6 +155,7 @@ def calculate_all_fares_endpoint(request: AllFaresRequest, db: Session = Depends
 async def create_customer_order_endpoint(
     order: CustomerOrderCreate,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     # 1. Fetch the exact price from admin-configured rules
@@ -162,16 +178,20 @@ async def create_customer_order_endpoint(
     raw_fare = secure_base_fare + secure_distance_charge
     secure_total_fare = max(raw_fare, float(config.minimum_fare))
 
-    # Driver gets the locked payout for this order (fare - platform commission)
-    secure_driver_payout = max(0.0, secure_total_fare - float(config.platform_commission))
+    # Commission & payout
+    # `platform_commission` is treated as a fixed amount (e.g., 10.0 = ₹10).
+    secure_platform_commission = min(float(config.platform_commission), secure_total_fare)
+    secure_driver_payout = max(0.0, secure_total_fare - secure_platform_commission)
 
     # 3. Save to DB with backend-forced prices + OTPs
     db_order = crud_customer_order.create_customer_order(
         db,
         order,
+        user_id=current_user.id,
         secure_base_fare=secure_base_fare,
         secure_distance_charge=secure_distance_charge,
         secure_total_fare=secure_total_fare,
+        secure_platform_commission=secure_platform_commission,
         secure_driver_payout=secure_driver_payout,
     )
 

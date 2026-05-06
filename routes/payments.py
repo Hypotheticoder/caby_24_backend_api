@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import os
 import hashlib
+from decimal import Decimal, InvalidOperation
 from database import get_db
 from schemas.payment import PaymentCreate, PaymentRead, PaymentUpdate
 import crud.payment as crud_payment
@@ -95,8 +96,20 @@ async def payu_callback(request: Request, db: Session = Depends(get_db)):
         # 1. Fetch the original order from your DB
         original_order = crud_payment.get_payment_by_txnid(db, txnid)
         
-        # 2. Check the amount! (Convert both to float to be safe)
-        if original_order and float(original_order.amount) == float(amount):
+        # 2. Check the amount with a tiny tolerance (1 paisa) to avoid float edge cases
+        try:
+            expected_amount = Decimal(str(original_order.amount)) if original_order else None
+            received_amount = Decimal(str(amount))
+        except (InvalidOperation, TypeError):
+            expected_amount = None
+            received_amount = None
+
+        if (
+            original_order
+            and expected_amount is not None
+            and received_amount is not None
+            and abs(expected_amount - received_amount) < Decimal("0.01")
+        ):
             # 🟢 ALL GOOD! Update DB
             crud_payment.update_payment_status(db, txnid=txnid, status=status)
         else:
@@ -112,9 +125,9 @@ async def payu_callback(request: Request, db: Session = Depends(get_db)):
         status = "failed"
         
     if status.lower() == "success":
-        return RedirectResponse(url=f"bhukk://payment-success?txnid={txnid}")
+        return RedirectResponse(url=f"bhukk://payment-success?txnid={txnid}", status_code=302)
     else:
-        return RedirectResponse(url=f"bhukk://payment-failed?txnid={txnid}")
+        return RedirectResponse(url=f"bhukk://payment-failed?txnid={txnid}", status_code=302)
 
 
 @router.post("/create", response_model=PaymentRead)

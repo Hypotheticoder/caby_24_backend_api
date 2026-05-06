@@ -52,6 +52,10 @@ class CustomerOrder(Base):
 
     # Driver's exact cut locked at order creation time
     driver_payout = Column(Float, nullable=True)
+    
+    # 🚨 ADD THESE TWO COLUMNS 🚨
+    platform_commission = Column(Float, nullable=True) # What the driver owes you
+    estimated_time_mins = Column(Integer, nullable=True) # For the UI popup
 
     # 5. Payment & Status
     payment_method = Column(String, nullable=False)  # "online" or "cod"

@@ -23,9 +23,11 @@ def get_customer_orders(db: Session, skip: int = 0, limit: int = 100):
 def create_customer_order(
     db: Session,
     order: CustomerOrderCreate,
+    user_id: str,
     secure_base_fare: float,
     secure_distance_charge: float,
     secure_total_fare: float,
+    secure_platform_commission: float,
     secure_driver_payout: float,
 ):
     # Convert Pydantic model to dictionary
@@ -34,10 +36,13 @@ def create_customer_order(
     else:
         data = order.dict()
 
+    data["user_id"] = user_id
+
     # 🔒 THE SECURITY LOCK: Force the backend prices
     data["base_fare"] = secure_base_fare
     data["distance_charge"] = secure_distance_charge
     data["total_fare"] = secure_total_fare
+    data["platform_commission"] = secure_platform_commission
     data["driver_payout"] = secure_driver_payout
     data["status"] = "pending"
     data["payment_status"] = "pending"

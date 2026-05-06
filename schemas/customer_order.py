@@ -38,27 +38,30 @@ class CustomerOrderBase(BaseModel):
     scheduled_at: Optional[datetime] = None
 
     status: Optional[str] = "pending"
+    estimated_time_mins: Optional[int] = None
+    platform_commission: Optional[float] = None
 
 
 class CustomerOrderCreate(BaseModel):
-    user_id: str
-    order_type: str
-    vehicle_type: str  # "bike", "cab", etc.
-    distance_km: float  # Backend needs this for math!
+    order_type: str  # "parcel" or "ride"
+    vehicle_type: str  # "bike", "parcel_bike", etc.
 
+    # Locations
     pickup_address: str
     pickup_lat: float
     pickup_lng: float
-    pickup_contact_name: Optional[str] = None
-    pickup_contact_phone: Optional[str] = None
-
     drop_address: str
     drop_lat: float
     drop_lng: float
-    drop_contact_name: Optional[str] = None
-    drop_contact_phone: Optional[str] = None
 
-    payment_method: str
+    # Logistics (Flutter must send these on confirm)
+    distance_km: float
+    estimated_time_mins: int
+    payment_method: str  # "upi" or "cod"
+    # Optional Parcel Stuff
+    item_count: Optional[int] = 1
+    parcel_type: Optional[str] = None
+    weight_kg: Optional[float] = None
 
 
 class CustomerOrderUpdate(BaseModel):
@@ -119,6 +122,8 @@ class CustomerOrderRead(CustomerOrderBase):
 class FareEstimateRequest(BaseModel):
     service_type: str
     distance_km: float
+    weight_kg: float = 0.0
+    is_parcel: bool = False
 
 class FareEstimateResponse(BaseModel):
     is_peak_time: bool
@@ -134,6 +139,8 @@ class FareEstimateResponse(BaseModel):
 # Flutter only needs to send the distance now!
 class AllFaresRequest(BaseModel):
     distance_km: float
+    weight_kg: float = 0.0
+    is_parcel: bool = False
 
 
 # The breakdown for a single vehicle in the list
@@ -143,5 +150,8 @@ class VehicleFareItem(BaseModel):
     per_km_rate: float
     total_fare: float
     is_peak_time: bool
+    
+    # 🚨 ADD THIS SO FLUTTER CAN SEE IT 🚨
+    max_weight: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)

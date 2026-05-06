@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
+from typing import Optional
 
 # 1. The base data every config has
 class EarningsConfigBase(BaseModel):
@@ -9,13 +10,23 @@ class EarningsConfigBase(BaseModel):
     per_km_rate: float
     minimum_fare: float
     platform_commission: float
+    max_weight_kg: Optional[float] = None
+    max_distance_km: Optional[float] = None
+
+    # 🚨 Driver pickup search radius (km)
+    pickup_radius_km: float = 10.0
 
 # 2. What the Admin Panel sends when they hit "Save"
 class EarningsConfigUpdateRequest(BaseModel):
-    base_fare: float
-    per_km_rate: float
-    minimum_fare: float
-    platform_commission: float
+    base_fare: Optional[float] = None
+    per_km_rate: Optional[float] = None
+    minimum_fare: Optional[float] = None
+    platform_commission: Optional[float] = None
+    max_weight_kg: Optional[float] = None
+    max_distance_km: Optional[float] = None
+
+    # 🚨 Allow admins to edit the radius
+    pickup_radius_km: Optional[float] = None
 
 # 3. What FastAPI sends back to the Admin Panel to display the table
 class EarningsConfigRead(EarningsConfigBase):

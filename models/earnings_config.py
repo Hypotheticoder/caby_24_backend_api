@@ -21,5 +21,12 @@ class EarningsConfig(Base):
     
     # The fixed commission amount from your document (e.g., ₹10 or ₹20)
     platform_commission = Column(Float, nullable=False) 
+    
+    max_weight_kg = Column(Float, nullable=False, default=9999.0)
+    
+    # 🚨 ADD THIS NEW COLUMN FOR OUT-OF-CITY VALIDATION 🚨
+    max_distance_km = Column(Float, nullable=False, default=9999.0)
 
+    pickup_radius_km = Column(Float, nullable=False, default=10.0)
+    
     created_at = Column(DateTime, default=datetime.utcnow)

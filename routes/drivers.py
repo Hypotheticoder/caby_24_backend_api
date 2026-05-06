@@ -15,6 +15,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
@@ -35,6 +36,7 @@ from schemas.driver import DriverCreate, DriverRead, DriverUpdate
 from schemas.customer_order import CustomerOrderRead
 
 from routes.customer_orders import parcel_ws_manager
+from models.earnings_config import EarningsConfig
 
 router = APIRouter(prefix="/drivers", tags=["drivers"])
 
@@ -185,20 +187,71 @@ class StatusUpdate(BaseModel):
 
 @router.get("/jobs/available", response_model=list[CustomerOrderRead])
 def available_jobs(
+    driver_lat: float = Query(..., description="Driver's live latitude from Flutter"),
+    driver_lng: float = Query(..., description="Driver's live longitude from Flutter"),
+    accepts_rides: bool = Query(True, description="Flutter toggle for passenger rides"),
+    accepts_parcels: bool = Query(True, description="Flutter toggle for parcel deliveries"),
     skip: int = 0,
     limit: int = 100,
-    type_filter: Optional[str] = Query(None, description="Filter by order_type (e.g., ride, parcel)"),
     current_driver=Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
-    query = db.query(CustomerOrder).filter(CustomerOrder.status.in_(["PENDING", "pending"]))
-    if type_filter:
-        query = query.filter(CustomerOrder.order_type == type_filter)
+    
+    # 1. Identify the driver's vehicle instantly from their Auth Token
+    driver_vehicle_type = current_driver.vehicle_type
+
+    # 2. Get the specific Search Radius from your Admin Database (optional)
+    # If the column doesn't exist in this codebase, fall back to 5km.
+    driver_config = (
+        db.query(EarningsConfig)
+        .filter(
+            EarningsConfig.service_type == driver_vehicle_type,
+            EarningsConfig.is_peak_time == False,
+        )
+        .first()
+    )
+    dynamic_radius = getattr(driver_config, "pickup_radius_km", None) if driver_config else None
+    if dynamic_radius is None:
+        dynamic_radius = 5.0
+
+    # 3. Build the "Slice" based on the driver's Flutter toggles
+    allowed_vehicle_types = []
+    if accepts_rides:
+        allowed_vehicle_types.append(driver_vehicle_type) # e.g., "bike"
+    if accepts_parcels:
+        allowed_vehicle_types.append(f"parcel_{driver_vehicle_type}") # e.g., "parcel_bike"
+
+    # If the driver turned both toggles off, send them zero jobs
+    if not allowed_vehicle_types:
+        return []
+
+    # 4. The Haversine Formula (Earth's Curvature Math)
+    distance_expr = (
+        6371.0 * func.acos(
+            func.least(
+                1.0,
+                func.cos(func.radians(driver_lat))
+                * func.cos(func.radians(CustomerOrder.pickup_lat))
+                * func.cos(func.radians(CustomerOrder.pickup_lng) - func.radians(driver_lng))
+                + func.sin(func.radians(driver_lat))
+                * func.sin(func.radians(CustomerOrder.pickup_lat)),
+            )
+        )
+    )
+
+    # 5. The Master Query
+    query = db.query(CustomerOrder).filter(
+        CustomerOrder.status.in_(["PENDING", "pending"]),
+        CustomerOrder.assigned_driver_id.is_(None),
+        CustomerOrder.vehicle_type.in_(allowed_vehicle_types), # Filters out wrong vehicles
+        distance_expr <= dynamic_radius                        # Blocks pickups that are too far
+    ).order_by(
+        distance_expr.asc()                                    # Sorts closest jobs to the top
+    )
 
     return (
-        query.order_by(CustomerOrder.created_at.desc())
-        .offset(skip)
+        query.offset(skip)
         .limit(limit)
         .all()
     )

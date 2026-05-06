@@ -9,6 +9,12 @@ from typing import Optional
 from fastapi import Depends, Header, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from sqlalchemy.orm import Session
+
+from database import get_db
+import crud.user as crud_user
+from models.user import User
+
 
 security = HTTPBearer(auto_error=False)
 
@@ -119,3 +125,32 @@ def verify_firebase_token(
             print(f"❌ FIREBASE VERIFICATION FAILED: {str(e)}")
             raise HTTPException(status_code=401, detail=f"Invalid authentication credentials: {e}")
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+
+
+def get_current_user(
+    decoded_token: dict = Depends(verify_firebase_token),
+    db: Session = Depends(get_db),
+) -> User:
+    """Resolve the current customer user from the auth token.
+
+    Expects Firebase phone-auth tokens so we can map `phone_number` -> `users.phone`.
+    """
+
+    phone = decoded_token.get("phone_number") or decoded_token.get("phone")
+    if not phone or not str(phone).strip():
+        raise HTTPException(status_code=401, detail="Missing phone number in authentication token")
+
+    phone = str(phone).strip()
+
+    candidates: list[str] = [phone]
+    if phone.startswith("+91"):
+        candidates.append(phone[3:])
+    if phone.startswith("+"):
+        candidates.append(phone[1:])
+
+    for candidate in candidates:
+        user = crud_user.get_user_by_phone(db, candidate)
+        if user:
+            return user
+
+    raise HTTPException(status_code=404, detail="User not found")
