@@ -180,6 +180,15 @@ def get_current_driver(decoded_token: dict = Depends(verify_firebase_token), db:
     return driver
 
 
+@router.get("/me", response_model=DriverRead)
+def get_my_driver_profile(current_driver=Depends(get_current_driver)):
+    """
+    Flutter calls this when the app opens to load their profile.
+    It automatically decrypts the token and returns the Driver row.
+    """
+    return current_driver
+
+
 class StatusUpdate(BaseModel):
     status: str
     otp: Optional[str] = None
@@ -193,20 +202,23 @@ def available_jobs(
     accepts_parcels: bool = Query(True, description="Flutter toggle for parcel deliveries"),
     skip: int = 0,
     limit: int = 100,
-    current_driver=Depends(get_current_driver),
+    current_driver = Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
     
-    # 1. Identify the driver's vehicle instantly from their Auth Token
-    driver_vehicle_type = current_driver.vehicle_type
+    # 1. Grab the raw vehicle type (e.g., "BIKE")
+    raw_vehicle_type = current_driver.vehicle_type
 
-    # 2. Get the specific Search Radius from your Admin Database (optional)
-    # If the column doesn't exist in this codebase, fall back to 5km.
+    # 🚨 THE CRITICAL FIX: Force lowercase for the order slicing (e.g., "bike")
+    sanitized_vehicle = raw_vehicle_type.lower() if raw_vehicle_type else ""
+
+    # 2. Get the specific Search Radius from your Admin Database
     driver_config = (
         db.query(EarningsConfig)
         .filter(
-            EarningsConfig.service_type == driver_vehicle_type,
+            # Using func.lower to make sure we match regardless of how the config table is saved!
+            func.lower(EarningsConfig.service_type) == sanitized_vehicle,
             EarningsConfig.is_peak_time == False,
         )
         .first()
@@ -215,14 +227,14 @@ def available_jobs(
     if dynamic_radius is None:
         dynamic_radius = 5.0
 
-    # 3. Build the "Slice" based on the driver's Flutter toggles
+    # 3. Build the "Slice" using the SANITIZED lowercase vehicle type
     allowed_vehicle_types = []
     if accepts_rides:
-        allowed_vehicle_types.append(driver_vehicle_type) # e.g., "bike"
+        allowed_vehicle_types.append(sanitized_vehicle) # e.g., "bike"
     if accepts_parcels:
-        allowed_vehicle_types.append(f"parcel_{driver_vehicle_type}") # e.g., "parcel_bike"
+        allowed_vehicle_types.append(f"parcel_{sanitized_vehicle}") # e.g., "parcel_bike"
 
-    # If the driver turned both toggles off, send them zero jobs
+    # If the driver turned both toggles off or has no vehicle, send zero jobs
     if not allowed_vehicle_types:
         return []
 
@@ -244,10 +256,10 @@ def available_jobs(
     query = db.query(CustomerOrder).filter(
         CustomerOrder.status.in_(["PENDING", "pending"]),
         CustomerOrder.assigned_driver_id.is_(None),
-        CustomerOrder.vehicle_type.in_(allowed_vehicle_types), # Filters out wrong vehicles
-        distance_expr <= dynamic_radius                        # Blocks pickups that are too far
+        CustomerOrder.vehicle_type.in_(allowed_vehicle_types), # Safely filters with lowercase!
+        distance_expr <= dynamic_radius                        
     ).order_by(
-        distance_expr.asc()                                    # Sorts closest jobs to the top
+        distance_expr.asc()                                    
     )
 
     return (
