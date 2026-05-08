@@ -183,6 +183,13 @@ async def create_customer_order_endpoint(
     secure_platform_commission = min(float(config.platform_commission), secure_total_fare)
     secure_driver_payout = max(0.0, secure_total_fare - secure_platform_commission)
 
+    # 🚨 THE PAYMENT SHIELD
+    payment_method = (order.payment_method or "").lower()
+    if payment_method == "cod":
+        desired_status = "PENDING"
+    else:
+        desired_status = "AWAITING_PAYMENT"
+
     # 3. Save to DB with backend-forced prices + OTPs
     db_order = crud_customer_order.create_customer_order(
         db,
@@ -193,6 +200,7 @@ async def create_customer_order_endpoint(
         secure_total_fare=secure_total_fare,
         secure_platform_commission=secure_platform_commission,
         secure_driver_payout=secure_driver_payout,
+        status_override=desired_status,
     )
 
     # 2. Package the data for the Driver Hub
@@ -230,12 +238,8 @@ async def track_order_websocket(websocket: WebSocket, order_id: str):
     await parcel_ws_manager.connect(websocket, order_id)
     try:
         while True:
-            # 1. Listen for incoming JSON from the Driver App
-            data = await websocket.receive_text()
-            parsed_data = json.loads(data)
-
-            # 2. Instantly bounce that JSON to the Customer App!
-            await parcel_ws_manager.broadcast_to_order(order_id, parsed_data)
+            # Keep the connection open; client disconnect triggers WebSocketDisconnect.
+            await websocket.receive_text()
     except WebSocketDisconnect:
         parcel_ws_manager.disconnect(websocket, order_id)
 
@@ -287,73 +291,21 @@ def delete_customer_order_endpoint(order_id: str, db: Session = Depends(get_db))
     return
 
 
-from pydantic import BaseModel
-from typing import Optional
+@router.put("/{order_id}/switch-to-cod")
+def switch_order_to_cod(order_id: str, db: Session = Depends(get_db)):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
 
-# 1. Upgraded Webhook Payload (Now accepts name and phone!)
-class HubStatusUpdate(BaseModel):
-    status: str
-    driver_id: Optional[str] = None
-    driver_name: Optional[str] = None
-    driver_phone: Optional[str] = None
+    if not db_order:
+        raise HTTPException(status_code=404, detail="Order not found")
 
-# 2. Upgraded Webhook Route
-@router.post("/{order_id}/hub-webhook", status_code=200)
-def receive_hub_update(
-    order_id: str,
-    payload: HubStatusUpdate,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    """
-    The Driver Hub will call this endpoint when the driver
-    accepts, picks up, or delivers the parcel.
-    """
-    # Check if the Hub sent an "ACCEPTED" status with driver details
-    if payload.status == "ACCEPTED" and payload.driver_id:
+    if db_order.status != "AWAITING_PAYMENT":
+        raise HTTPException(status_code=400, detail="Cannot switch this order to COD")
 
-        # Call CRUD helper to assign the driver
-        updated_order = crud_customer_order.assign_driver_to_order(
-            db=db,
-            order_id=order_id,
-            driver_id=payload.driver_id,
-            driver_name=payload.driver_name or "Unknown Driver",
-            driver_phone=payload.driver_phone or "N/A",
-        )
+    db_order.payment_method = "cod"
+    db_order.status = "PENDING"
+    db.commit()
 
-        if not updated_order:
-            raise HTTPException(status_code=404, detail="Order not found in Parcel DB")
+    return {"message": "Switched to COD successfully", "status": "PENDING"}
 
-        # Broadcast to any connected customers watching this order (non-blocking)
-        background_tasks.add_task(
-            parcel_ws_manager.broadcast_to_order,
-            order_id,
-            {
-                "event": "DRIVER_ASSIGNED",
-                "assigned_driver_name": updated_order.assigned_driver_name,
-                "assigned_driver_phone": updated_order.assigned_driver_phone,
-                "pickup_otp": updated_order.pickup_otp,
-                    "drop_otp": updated_order.drop_otp,
-                "status": "ACCEPTED",
-            },
-        )
 
-        print(f"✅ Parcel Order {order_id} was just accepted by {payload.driver_name}!")
-
-    else:
-        # If it's just a standard status update (like "DELIVERED"), just update the status
-        db_order = crud_customer_order.get_customer_order(db, order_id)
-        if not db_order:
-            raise HTTPException(status_code=404, detail="Order not found")
-
-        db_order.status = payload.status
-        db.commit()
-
-        # Notify watchers of status change
-        background_tasks.add_task(
-            parcel_ws_manager.broadcast_to_order,
-            order_id,
-            {"event": "STATUS_UPDATE", "status": payload.status},
-        )
-
-    return {"message": "Webhook successfully saved to Parcel Database"}

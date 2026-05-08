@@ -3,6 +3,10 @@ from models.driver import Driver
 from schemas.driver import DriverCreate, DriverUpdate
 
 
+def get_drivers(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(Driver).offset(skip).limit(limit).all()
+
+
 def get_driver(db: Session, driver_id: str):
     return db.query(Driver).filter(Driver.id == driver_id).first()
 
@@ -11,20 +15,10 @@ def get_driver_by_phone(db: Session, phone: str):
     return db.query(Driver).filter(Driver.phone_number == phone).first()
 
 
-def get_driver_by_phone_number(db: Session, phone_number: str):
-    return get_driver_by_phone(db, phone_number)
-
-
 def get_driver_by_firebase_uid(db: Session, firebase_uid: str):
     return db.query(Driver).filter(Driver.firebase_uid == firebase_uid).first()
 
 
-def get_drivers(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(Driver).offset(skip).limit(limit).all()
-
-
-def list_drivers(db: Session, skip: int = 0, limit: int = 100):
-    return get_drivers(db, skip=skip, limit=limit)
 
 
 def create_driver(db: Session, driver: DriverCreate):

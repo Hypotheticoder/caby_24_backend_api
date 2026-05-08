@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import time
 
 from fastapi import (
     APIRouter,
@@ -25,8 +26,8 @@ from crud.driver import (
     create_driver,
     delete_driver,
     get_driver,
-    get_driver_by_phone_number,
-    list_drivers,
+    get_driver_by_phone,
+    get_drivers,
     update_driver,
 )
 import crud.customer_order as crud_customer_order
@@ -64,7 +65,7 @@ def create_driver_route(
 
 @router.get("/list", response_model=list[DriverRead])
 def list_drivers_route(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return list_drivers(db, skip=skip, limit=limit)
+    return get_drivers(db, skip=skip, limit=limit)
 
 
 @router.get("/exists")
@@ -76,7 +77,7 @@ def driver_phone_exists(
     if not normalized:
         raise HTTPException(status_code=400, detail="phone_number is required")
 
-    driver = get_driver_by_phone_number(db, normalized)
+    driver = get_driver_by_phone(db, normalized)
     if driver:
         return {"exists": True, "driver_id": str(driver.id)}
     return {"exists": False}
@@ -324,8 +325,8 @@ def update_job_status(
     if not db_order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if db_order.assigned_driver_id and db_order.assigned_driver_id != current_driver.id:
-        raise HTTPException(status_code=403, detail="Not authorized to update this job")
+    if db_order.assigned_driver_id != current_driver.id:
+        raise HTTPException(status_code=403, detail="You do not own this job")
 
     # If marking PICKED_UP, validate pickup OTP if present on order
     if payload.status == "PICKED_UP":
@@ -363,26 +364,32 @@ async def driver_location_ws(
         await websocket.close()
         return
 
+    last_db_save_time = 0.0
+
     try:
         while True:
             data = await websocket.receive_text()
             try:
                 obj = json.loads(data)
                 if isinstance(obj, dict) and "lat" in obj and "lng" in obj:
-                    # Update the model instance
-                    db_order.assigned_driver_lat = float(obj.get("lat"))
-                    db_order.assigned_driver_lng = float(obj.get("lng"))
-                    db_order.last_location_update = datetime.utcnow()
+                    await parcel_ws_manager.broadcast_to_order(
+                        order_id,
+                        {"event": "LOCATION_UPDATE", **obj},
+                    )
 
-                    db.commit()
-                    print(f"✅ DB UPDATED: {obj.get('lat')}, {obj.get('lng')}")
+                    current_time = time.time()
+                    if current_time - last_db_save_time > 15:
+                        db_order.assigned_driver_lat = float(obj.get("lat"))
+                        db_order.assigned_driver_lng = float(obj.get("lng"))
+                        db_order.last_location_update = datetime.utcnow()
+                        db.commit()
+
+                        last_db_save_time = current_time
+                        print(f"✅ DB SAVED: {obj.get('lat')}, {obj.get('lng')}")
             except Exception as e:
                 # This will tell you EXACTLY what is wrong.
                 print(f"❌ DATABASE UPDATE FAILED: {e}")
                 db.rollback()
-
-            if isinstance(obj, dict):
-                await parcel_ws_manager.broadcast_to_order(order_id, {"event": "LOCATION_UPDATE", **obj})
     except WebSocketDisconnect:
         return
 

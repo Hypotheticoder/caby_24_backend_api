@@ -1,3 +1,4 @@
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional
 import secrets
@@ -29,6 +30,7 @@ def create_customer_order(
     secure_total_fare: float,
     secure_platform_commission: float,
     secure_driver_payout: float,
+    status_override: str | None = None,
 ):
     # Convert Pydantic model to dictionary
     if hasattr(order, "model_dump"):
@@ -44,7 +46,7 @@ def create_customer_order(
     data["total_fare"] = secure_total_fare
     data["platform_commission"] = secure_platform_commission
     data["driver_payout"] = secure_driver_payout
-    data["status"] = "pending"
+    data["status"] = status_override or "pending"
     data["payment_status"] = "pending"
 
     # 🔐 Generate OTPs
@@ -87,34 +89,35 @@ def assign_driver_to_order(
 
     Returns the updated CustomerOrder or None if not found.
     """
-    db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
-    if not db_order:
-        return None
+    pickup_otp = _generate_otp()
+    drop_otp = _generate_otp()
+    while drop_otp == pickup_otp:
+        drop_otp = _generate_otp()
 
-    # Prevent multiple drivers from claiming the same job.
-    if (db_order.status or "").upper() != "PENDING":
-        return None
-
-    db_order.status = "ACCEPTED"
-    db_order.assigned_driver_id = driver_id
+    update_values = {
+        "assigned_driver_id": driver_id,
+        "status": "ACCEPTED",
+        "pickup_otp": func.coalesce(CustomerOrder.pickup_otp, pickup_otp),
+        "drop_otp": func.coalesce(CustomerOrder.drop_otp, drop_otp),
+    }
     if driver_name is not None:
-        db_order.assigned_driver_name = driver_name
+        update_values["assigned_driver_name"] = driver_name
     if driver_phone is not None:
-        db_order.assigned_driver_phone = driver_phone
+        update_values["assigned_driver_phone"] = driver_phone
 
-    # Generate OTPs on acceptance (monolith flow).
-    if not db_order.pickup_otp:
-        db_order.pickup_otp = _generate_otp()
-    if not db_order.drop_otp:
-        db_order.drop_otp = _generate_otp()
-
-    # Ensure pickup/drop OTPs are not identical.
-    if db_order.pickup_otp and db_order.drop_otp and db_order.pickup_otp == db_order.drop_otp:
-        new_drop_otp = _generate_otp()
-        while new_drop_otp == db_order.pickup_otp:
-            new_drop_otp = _generate_otp()
-        db_order.drop_otp = new_drop_otp
+    result = (
+        db.query(CustomerOrder)
+        .filter(
+            CustomerOrder.id == order_id,
+            CustomerOrder.assigned_driver_id.is_(None),
+            func.lower(CustomerOrder.status) == "pending",
+        )
+        .update(update_values, synchronize_session=False)
+    )
 
     db.commit()
-    db.refresh(db_order)
-    return db_order
+
+    if result == 0:
+        return None
+
+    return db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
