@@ -9,6 +9,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    firebase_uid = Column(String, unique=True, index=True, nullable=True)
     name = Column(String, nullable=False)
     email = Column(String, nullable=True) 
     phone = Column(String, nullable=False, unique=True)

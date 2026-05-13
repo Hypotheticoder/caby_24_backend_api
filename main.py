@@ -1,6 +1,14 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import firebase_admin
+from firebase_admin import credentials
+
+# Boot up Firebase ONE TIME when the server starts
+if not firebase_admin._apps:
+	cred = credentials.Certificate("service-account.json")
+	firebase_admin.initialize_app(cred)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

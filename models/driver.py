@@ -42,6 +42,11 @@ class Driver(Base):
 
     rating = Column(Float, nullable=False, default=0.0)
     total_deliveries = Column(Integer, nullable=False, default=0)
+    bank_account_name = Column(String, nullable=True)
+    bank_account_number = Column(String, nullable=True)
+    bank_ifsc_code = Column(String, nullable=True)
+    bank_name = Column(String, nullable=True)
+    bank_updated_at = Column(DateTime, nullable=True)
 
     assigned_orders = relationship("CustomerOrder", back_populates="driver")
 

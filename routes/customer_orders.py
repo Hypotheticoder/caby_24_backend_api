@@ -19,6 +19,7 @@ import crud.customer_order as crud_customer_order
 from models.earnings_config import EarningsConfig
 from dependencies import get_current_user
 from models.user import User
+from core.security_logic import PlatformGuard
 
 
 # Real-time tracking manager for customers watching an order
@@ -307,5 +308,47 @@ def switch_order_to_cod(order_id: str, db: Session = Depends(get_db)):
     db.commit()
 
     return {"message": "Switched to COD successfully", "status": "PENDING"}
+
+
+@router.post("/{order_id}/cancel")
+def cancel_order(
+    order_id: str, 
+    user_type: str = Query(..., description="'customer' or 'driver'"),
+    user_id: str = Query(...), 
+    db: Session = Depends(get_db)
+):
+    # Dynamically import to avoid circular dependencies (matching your file's style)
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    
+    db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
+    
+    if not db_order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # RULE 1: No cancellations after pickup
+    if db_order.status.upper() in ["PICKED_UP", "ON_THE_WAY", "DELIVERED", "COMPLETED"]:
+        raise HTTPException(status_code=403, detail="Order already picked up. Cannot cancel now.")
+
+    # RULE 2: Driver Ban Check
+    if user_type == "driver":
+        is_banned, msg = PlatformGuard.check_ban(user_id)
+        if is_banned:
+            raise HTTPException(status_code=403, detail=msg)
+
+    # RULE 3: Rolling Window Limits
+    limit = 2 if user_type == "driver" else 4
+    can_cancel = PlatformGuard.attempt_cancellation(user_type, user_id, limit)
+    
+    if not can_cancel:
+        if user_type == "driver":
+            raise HTTPException(status_code=403, detail="Limit reached! Account suspended for 24 hours.")
+        else:
+            raise HTTPException(status_code=403, detail="Daily cancellation limit reached (4/4). Try again tomorrow.")
+
+    # Execute Cancellation
+    db_order.status = "CANCELLED"
+    db.commit()
+
+    return {"status": "success", "message": "Order cancelled successfully"}
 
 

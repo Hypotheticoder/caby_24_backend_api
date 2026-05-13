@@ -1,6 +1,7 @@
+from datetime import datetime
 from sqlalchemy.orm import Session
 from models.driver import Driver
-from schemas.driver import DriverCreate, DriverUpdate
+from schemas.driver import BankDetailPayload, DriverCreate, DriverUpdate
 
 
 def get_drivers(db: Session, skip: int = 0, limit: int = 100):
@@ -69,3 +70,15 @@ def update_driver(db: Session, db_driver: Driver, updates: DriverUpdate):
 def delete_driver(db: Session, db_driver: Driver):
     db.delete(db_driver)
     db.commit()
+
+
+def update_bank_details(db: Session, db_driver: Driver, payload: BankDetailPayload):
+    db_driver.bank_account_name = payload.account_name
+    db_driver.bank_account_number = payload.account_number
+    db_driver.bank_ifsc_code = payload.ifsc_code
+    db_driver.bank_name = payload.bank_name
+    db_driver.bank_updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(db_driver)
+    return db_driver

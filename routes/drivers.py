@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+import hashlib
 import json
+import os
 import time
+import uuid
 
 from fastapi import (
     APIRouter,
@@ -11,14 +15,16 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
-from sqlalchemy import func
+from fastapi.responses import RedirectResponse
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel
 
 from core.uploads import ensure_driver_upload_dir, save_upload_file, uploaded_file_url_path
@@ -30,14 +36,23 @@ from crud.driver import (
     get_drivers,
     update_driver,
 )
+import crud.driver as crud_driver
 import crud.customer_order as crud_customer_order
+import crud.transaction as crud_transaction
 from db import get_db
 from dependencies import verify_firebase_token
-from schemas.driver import DriverCreate, DriverRead, DriverUpdate
+from schemas.driver import BankDetailPayload, DriverCreate, DriverRead, DriverUpdate
 from schemas.customer_order import CustomerOrderRead
+from schemas.transaction import (
+    AnalyticsDashboard,
+    DailyBar,
+    PieSlice,
+    TransactionRead,
+)
 
-from routes.customer_orders import parcel_ws_manager
+from routes.customer_orders import is_currently_peak_time, parcel_ws_manager
 from models.earnings_config import EarningsConfig
+from models.transaction import Transaction
 
 router = APIRouter(prefix="/drivers", tags=["drivers"])
 
@@ -190,84 +205,387 @@ def get_my_driver_profile(current_driver=Depends(get_current_driver)):
     return current_driver
 
 
-class StatusUpdate(BaseModel):
-    status: str
-    otp: Optional[str] = None
+@router.get("/me/bank-details")
+def get_bank_details(current_driver=Depends(get_current_driver)):
+    if not current_driver.bank_account_number:
+        return {"has_bank_details": False}
+
+    return {
+        "has_bank_details": True,
+        "account_name": current_driver.bank_account_name,
+        "account_number": current_driver.bank_account_number,
+        "ifsc_code": current_driver.bank_ifsc_code,
+        "bank_name": current_driver.bank_name,
+    }
 
 
-@router.get("/jobs/available", response_model=list[CustomerOrderRead])
-def available_jobs(
-    driver_lat: float = Query(..., description="Driver's live latitude from Flutter"),
-    driver_lng: float = Query(..., description="Driver's live longitude from Flutter"),
-    accepts_rides: bool = Query(True, description="Flutter toggle for passenger rides"),
-    accepts_parcels: bool = Query(True, description="Flutter toggle for parcel deliveries"),
+@router.put("/me/bank-details")
+def update_bank_details(
+    payload: BankDetailPayload,
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    crud_driver.update_bank_details(db=db, db_driver=current_driver, payload=payload)
+    return {"message": "Bank details saved. Withdrawals locked for 24 hours for security."}
+
+
+class WithdrawRequestPayload(BaseModel):
+    amount: float
+
+
+@router.post("/me/wallet/settle/initiate")
+def initialize_driver_payu(request: WithdrawRequestPayload, current_driver=Depends(get_current_driver)):
+    key = os.getenv("PAYU_MERCHANT_KEY", "")
+    salt = os.getenv("PAYU_MERCHANT_SALT", "").strip()
+
+    txnid = f"DRV{uuid.uuid4().hex[:10].upper()}"
+    
+    # 🚨 Force strictly 2 decimal places to fix the PayU 5019 Error
+    amount_str = f"{float(request.amount):.2f}"
+    
+    productinfo = "Platform_Fee_Settlement"
+    firstname = current_driver.name.split(" ")[0] if current_driver.name else "Driver"
+    email = current_driver.email or "driver@bhukk.com"
+    
+    # 🚨 Use udf1 for the driver ID so we don't have to touch the database here!
+    udf1 = str(current_driver.id)
+
+    # Hash with exactly 10 empty pipes between udf1 and salt
+    hash_sequence = f"{key}|{txnid}|{amount_str}|{productinfo}|{firstname}|{email}|{udf1}||||||||||{salt}"
+    hash_value = hashlib.sha512(hash_sequence.encode("utf-8")).hexdigest()
+
+    # 🚨 NOTICE: The db.add() is completely gone from here. No more PostgreSQL crashes!
+
+    return {
+        "hash": hash_value,
+        "txnid": txnid,
+        "amount": amount_str,
+        "key": key,
+        "productinfo": productinfo,
+        "firstname": firstname,
+        "email": email,
+        "udf1": udf1, 
+        "surl": "http://192.168.0.222:8000/drivers/me/wallet/settle/callback",
+        "furl": "http://192.168.0.222:8000/drivers/me/wallet/settle/callback"
+    }
+
+
+@router.post("/me/wallet/settle/hash")
+async def generate_dynamic_payu_hash(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    hash_string = data.get("hash_string") or data.get("hashString", "")
+    salt = os.getenv("PAYU_MERCHANT_SALT", "").strip()
+
+    if not salt:
+        raise HTTPException(status_code=500, detail="Server misconfiguration: Missing SALT")
+
+    if hash_string:
+        hash_sequence = hash_string + salt
+        generated_hash = hashlib.sha512(hash_sequence.encode("utf-8")).hexdigest()
+        return {"hash": generated_hash}
+
+    raise HTTPException(status_code=400, detail="Missing hash string in request")
+
+
+@router.post("/me/wallet/settle/callback")
+async def driver_payu_callback(request: Request, db: Session = Depends(get_db)):
+    form_data = await request.form()
+
+    status = form_data.get("status", "")
+    txnid = form_data.get("txnid", "")
+    posted_hash = form_data.get("hash", "")
+    key = form_data.get("key", "")
+    productinfo = form_data.get("productinfo", "")
+    firstname = form_data.get("firstname", "")
+    email = form_data.get("email", "")
+    amount = form_data.get("amount", "")
+
+    # 🚨 Get the driver ID back from PayU!
+    udf1 = form_data.get("udf1", "") 
+
+    salt = os.getenv("PAYU_MERCHANT_SALT", "").strip()
+
+    # Reverse hash to verify the payment wasn't tampered with
+    reverse_hash_seq = f"{salt}|{status}||||||||||{udf1}|{email}|{firstname}|{productinfo}|{amount}|{txnid}|{key}"
+    calculated_hash = hashlib.sha512(reverse_hash_seq.encode('utf-8')).hexdigest()
+
+    if calculated_hash == posted_hash and status.lower() == "success":
+        # 🚨 Payment is officially safe! NOW we write to the database.
+        # We leave order_id=None so the database doesn't crash!
+        Transaction = __import__("models.transaction", fromlist=["Transaction"]).Transaction
+        db_tx = Transaction(
+            driver_id=udf1,
+            order_id=None, 
+            amount=float(amount),
+            transaction_type="settlement",
+            payment_mode="payu",
+            title="Platform Fees Paid",
+            status="completed"
+        )
+        db.add(db_tx)
+        db.commit()
+        return RedirectResponse(url=f"bhukkdriver://payment-success?txnid={txnid}", status_code=302)
+    else:
+        return RedirectResponse(url=f"bhukkdriver://payment-failed?txnid={txnid}", status_code=302)
+
+
+@router.get("/me/earnings")
+def get_dashboard_balances(
+    service_type: Optional[str] = Query("all"),
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    Transaction = __import__("models.transaction", fromlist=["Transaction"]).Transaction
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    today = date.today()
+
+    def build_query(t_type: str, only_today: bool = False):
+        query = db.query(func.sum(Transaction.amount))
+
+        if service_type and service_type.lower() != "all":
+            query = query.outerjoin(CustomerOrder, Transaction.order_id == CustomerOrder.id)
+            query = query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+
+        query = query.filter(
+            Transaction.driver_id == current_driver.id,
+            func.lower(Transaction.transaction_type) == t_type.lower(),
+        )
+        if only_today:
+            query = query.filter(func.date(Transaction.created_at) == today)
+        return query
+
+    online_earn = build_query("earning").scalar() or 0.0
+    cash_today = build_query("cash_collected", only_today=True).scalar() or 0.0
+    comm_today = build_query("commission", only_today=True).scalar() or 0.0
+    total_comm = build_query("commission").scalar() or 0.0
+
+    today_profit = cash_today - comm_today
+    net_balance = online_earn - total_comm
+
+    breakdown_query = (
+        db.query(
+            CustomerOrder.order_type,
+            func.sum(
+                case(
+                    (func.lower(Transaction.transaction_type) == "earning", Transaction.amount),
+                    (func.lower(Transaction.transaction_type) == "cash_collected", Transaction.amount),
+                    (func.lower(Transaction.transaction_type) == "commission", -Transaction.amount),
+                    else_=0,
+                )
+            ).label("profit"),
+        )
+        .outerjoin(CustomerOrder, Transaction.order_id == CustomerOrder.id)
+        .filter(Transaction.driver_id == current_driver.id)
+        .group_by(CustomerOrder.order_type)
+        .all()
+    )
+
+    ride_total = 0.0
+    parcel_total = 0.0
+    for row in breakdown_query:
+        raw_type = (row.order_type or "").lower()
+        profit = float(row.profit or 0.0)
+        if "ride" in raw_type:
+            ride_total += profit
+        elif "parcel" in raw_type:
+            parcel_total += profit
+
+    return {
+        "today_earnings": today_profit,
+        "cash_collected_today": cash_today,
+        "amount_owed_to_company": total_comm,
+        "net_balance": net_balance,
+        "breakdown": {"ride_earnings": ride_total, "parcel_earnings": parcel_total},
+    }
+
+
+@router.get("/me/wallet/statement", response_model=List[TransactionRead])
+def get_wallet_statement(
+    limit: int = 50,
+    service_type: Optional[str] = Query("all"),
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the raw list of transactions for the Flutter app to display
+    in the Earnings Dashboard (like a bank statement).
+    """
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    query = (
+        db.query(Transaction, CustomerOrder)
+        .outerjoin(CustomerOrder, Transaction.order_id == CustomerOrder.id)
+        .filter(Transaction.driver_id == current_driver.id)
+    )
+
+    if service_type and service_type.lower() != "all":
+        query = query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+
+    results = query.order_by(Transaction.created_at.desc()).limit(limit).all()
+
+    formatted_statement = []
+
+    for tx, order in results:
+        formatted_date = tx.created_at.strftime("%b %d, %I:%M %p")
+
+        title = "System Transaction"
+
+        if tx.transaction_type == "EARNING":
+            title = f"Payout for {order.order_type.capitalize()}" if order else "Bonus Payout"
+        elif tx.transaction_type == "COMMISSION":
+            title = "Platform Fee (COD)"
+        elif tx.transaction_type == "CASH_COLLECTED":
+            title = "Cash Collected from Customer"
+        elif tx.transaction_type == "PENALTY":
+            title = f"Penalty on Order {str(order.id)[:6]}" if order else "System Penalty"
+        elif tx.transaction_type == "SETTLEMENT":
+            title = "Paid to Company (Settle Up)"
+
+        formatted_statement.append(
+            TransactionRead(
+                id=tx.id,
+                amount=tx.amount,
+                transaction_type=tx.transaction_type,
+                payment_mode=tx.payment_mode,
+                title=title,
+                date=formatted_date,
+            )
+        )
+
+    return formatted_statement
+
+
+@router.get("/me/wallet/analytics", response_model=AnalyticsDashboard)
+def get_wallet_analytics(
+    period: str = Query("weekly", enum=["daily", "weekly", "monthly"]),
+    service_type: Optional[str] = Query("all"),
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    Transaction = __import__("models.transaction", fromlist=["Transaction"]).Transaction
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    now = datetime.utcnow()
+    if period == "daily":
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        group_format = "%I %p"
+    elif period == "weekly":
+        start_date = now - timedelta(days=7)
+        group_format = "%a"
+    else:
+        start_date = now - timedelta(days=30)
+        group_format = "%b %d"
+
+    query = (
+        db.query(
+            func.date(Transaction.created_at).label("date"),
+            func.sum(
+                case(
+                    (func.lower(Transaction.transaction_type) == "earning", Transaction.amount),
+                    (func.lower(Transaction.transaction_type) == "cash_collected", Transaction.amount),
+                    (func.lower(Transaction.transaction_type) == "commission", -Transaction.amount),
+                    else_=0,
+                )
+            ).label("profit"),
+        )
+        .outerjoin(CustomerOrder, Transaction.order_id == CustomerOrder.id)
+        .filter(
+            Transaction.driver_id == current_driver.id,
+            Transaction.created_at >= start_date,
+        )
+    )
+
+    if service_type and service_type.lower() != "all":
+        query = query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+
+    daily_query = query.group_by(func.date(Transaction.created_at)).all()
+
+    weekly_bars = [
+        DailyBar(day=row.date.strftime(group_format), amount=float(row.profit or 0))
+        for row in daily_query
+    ]
+
+    pie_query = (
+        db.query(
+            CustomerOrder.order_type,
+            func.sum(
+                case(
+                    (func.lower(Transaction.transaction_type) == "earning", Transaction.amount),
+                    (func.lower(Transaction.transaction_type) == "cash_collected", Transaction.amount),
+                    (func.lower(Transaction.transaction_type) == "commission", -Transaction.amount),
+                    else_=0,
+                )
+            ).label("total_profit"),
+        )
+        .outerjoin(CustomerOrder, Transaction.order_id == CustomerOrder.id)
+        .filter(
+            Transaction.driver_id == current_driver.id,
+            Transaction.created_at >= start_date,
+        )
+    )
+
+    if service_type and service_type.lower() != "all":
+        pie_query = pie_query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+
+    pie_results = pie_query.group_by(CustomerOrder.order_type).all()
+
+    income_pie = []
+    total_profit_sum = sum(float(row.total_profit or 0) for row in pie_results)
+
+    for row in pie_results:
+        raw_type = (row.order_type or "other").lower()
+
+        if "parcel" in raw_type:
+            display_name = "Parcel"
+        elif "ride" in raw_type:
+            display_name = "Ride"
+        else:
+            display_name = raw_type.capitalize()
+
+        amt = float(row.total_profit or 0)
+
+        if amt > 0 and total_profit_sum > 0:
+            income_pie.append(
+                PieSlice(
+                    category=display_name,
+                    amount=amt,
+                    percentage=round((amt / total_profit_sum) * 100, 1),
+                )
+            )
+
+    return AnalyticsDashboard(weekly_bars=weekly_bars, income_pie=income_pie)
+
+
+@router.get("/me/jobs/history", response_model=list[CustomerOrderRead])
+def get_job_history(
+    service_type: Optional[str] = Query("all", description="Filter by ride or parcel"),
     skip: int = 0,
-    limit: int = 100,
-    current_driver = Depends(get_current_driver),
+    limit: int = 50,
+    current_driver=Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
-    
-    # 1. Grab the raw vehicle type (e.g., "BIKE")
-    raw_vehicle_type = current_driver.vehicle_type
 
-    # 🚨 THE CRITICAL FIX: Force lowercase for the order slicing (e.g., "bike")
-    sanitized_vehicle = raw_vehicle_type.lower() if raw_vehicle_type else ""
-
-    # 2. Get the specific Search Radius from your Admin Database
-    driver_config = (
-        db.query(EarningsConfig)
-        .filter(
-            # Using func.lower to make sure we match regardless of how the config table is saved!
-            func.lower(EarningsConfig.service_type) == sanitized_vehicle,
-            EarningsConfig.is_peak_time == False,
-        )
-        .first()
-    )
-    dynamic_radius = getattr(driver_config, "pickup_radius_km", None) if driver_config else None
-    if dynamic_radius is None:
-        dynamic_radius = 5.0
-
-    # 3. Build the "Slice" using the SANITIZED lowercase vehicle type
-    allowed_vehicle_types = []
-    if accepts_rides:
-        allowed_vehicle_types.append(sanitized_vehicle) # e.g., "bike"
-    if accepts_parcels:
-        allowed_vehicle_types.append(f"parcel_{sanitized_vehicle}") # e.g., "parcel_bike"
-
-    # If the driver turned both toggles off or has no vehicle, send zero jobs
-    if not allowed_vehicle_types:
-        return []
-
-    # 4. The Haversine Formula (Earth's Curvature Math)
-    distance_expr = (
-        6371.0 * func.acos(
-            func.least(
-                1.0,
-                func.cos(func.radians(driver_lat))
-                * func.cos(func.radians(CustomerOrder.pickup_lat))
-                * func.cos(func.radians(CustomerOrder.pickup_lng) - func.radians(driver_lng))
-                + func.sin(func.radians(driver_lat))
-                * func.sin(func.radians(CustomerOrder.pickup_lat)),
-            )
-        )
-    )
-
-    # 5. The Master Query
     query = db.query(CustomerOrder).filter(
-        CustomerOrder.status.in_(["PENDING", "pending"]),
-        CustomerOrder.assigned_driver_id.is_(None),
-        CustomerOrder.vehicle_type.in_(allowed_vehicle_types), # Safely filters with lowercase!
-        distance_expr <= dynamic_radius                        
-    ).order_by(
-        distance_expr.asc()                                    
+        CustomerOrder.assigned_driver_id == current_driver.id,
+        func.lower(CustomerOrder.status).in_(["delivered", "cancelled"]),
     )
 
-    return (
-        query.offset(skip)
+    if service_type and service_type.lower() != "all":
+        query = query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+
+    results = (
+        query.order_by(CustomerOrder.created_at.desc())
+        .offset(skip)
         .limit(limit)
         .all()
     )
+
+    return results
 
 
 @router.post("/jobs/{order_id}/accept")
@@ -313,6 +631,78 @@ def accept_job(
     }
 
 
+class StatusUpdate(BaseModel):
+    status: str
+    otp: Optional[str] = None
+
+
+@router.get("/jobs/available", response_model=list[CustomerOrderRead])
+def available_jobs(
+    driver_lat: float = Query(..., description="Driver's live latitude from Flutter"),
+    driver_lng: float = Query(..., description="Driver's live longitude from Flutter"),
+    accepts_rides: bool = Query(True, description="Flutter toggle for passenger rides"),
+    accepts_parcels: bool = Query(True, description="Flutter toggle for parcel deliveries"),
+    skip: int = 0,
+    limit: int = 100,
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    # 1. Grab the raw vehicle type (e.g., "BIKE")
+    raw_vehicle_type = current_driver.vehicle_type
+    sanitized_vehicle = raw_vehicle_type.lower() if raw_vehicle_type else ""
+
+    # 2. Get the specific Search Radius
+    driver_config = (
+        db.query(EarningsConfig)
+        .filter(
+            func.lower(EarningsConfig.service_type) == sanitized_vehicle,
+            EarningsConfig.is_peak_time == False,
+        )
+        .first()
+    )
+    dynamic_radius = getattr(driver_config, "pickup_radius_km", None) if driver_config else None
+    if dynamic_radius is None:
+        dynamic_radius = 5.0
+
+    # 3. Build the Allowed Vehicles List
+    allowed_vehicle_types = []
+    if accepts_rides:
+        allowed_vehicle_types.append(sanitized_vehicle)
+    if accepts_parcels:
+        allowed_vehicle_types.append(f"parcel_{sanitized_vehicle}")
+
+    if not allowed_vehicle_types:
+        return []
+
+    # 4. The Haversine Formula (Distance Math)
+    distance_expr = (
+        6371.0 * func.acos(
+            func.least(
+                1.0,
+                func.cos(func.radians(driver_lat))
+                * func.cos(func.radians(CustomerOrder.pickup_lat))
+                * func.cos(func.radians(CustomerOrder.pickup_lng) - func.radians(driver_lng))
+                + func.sin(func.radians(driver_lat))
+                * func.sin(func.radians(CustomerOrder.pickup_lat)),
+            )
+        )
+    )
+
+    # 5. Master Query
+    query = db.query(CustomerOrder).filter(
+        func.lower(CustomerOrder.status) == "pending",
+        CustomerOrder.assigned_driver_id.is_(None),
+        CustomerOrder.vehicle_type.in_(allowed_vehicle_types),
+        distance_expr <= dynamic_radius,
+    ).order_by(
+        distance_expr.asc()
+    )
+
+    return query.offset(skip).limit(limit).all()
+
+
 @router.put("/jobs/{order_id}/status")
 def update_job_status(
     order_id: str,
@@ -328,26 +718,78 @@ def update_job_status(
     if db_order.assigned_driver_id != current_driver.id:
         raise HTTPException(status_code=403, detail="You do not own this job")
 
-    # If marking PICKED_UP, validate pickup OTP if present on order
-    if payload.status == "PICKED_UP":
+    new_status = payload.status.lower()
+
+    # OTP checks (as usual)
+    if new_status == "picked_up":
         if db_order.pickup_otp and payload.otp != db_order.pickup_otp:
             raise HTTPException(status_code=400, detail="Invalid pickup OTP")
-
-    # If marking DELIVERED, validate drop-off OTP if present on order
-    elif payload.status == "DELIVERED":
+    elif new_status == "delivered":
         if db_order.drop_otp and payload.otp != db_order.drop_otp:
             raise HTTPException(status_code=400, detail="Invalid drop-off OTP")
 
-    db_order.status = payload.status
+    # Updated subtraction logic
+    if new_status == "delivered" and db_order.status.lower() != "delivered":
+        payment_mode = (db_order.payment_method or "online").lower()
+
+        platform_fee = db_order.platform_commission
+        if platform_fee is None:
+            peak_status = is_currently_peak_time(db)
+            config = (
+                db.query(EarningsConfig)
+                .filter(
+                    EarningsConfig.service_type == (db_order.vehicle_type or "").lower(),
+                    EarningsConfig.is_peak_time == peak_status,
+                )
+                .first()
+            )
+            platform_fee = float(config.platform_commission) if config else 0.0
+
+        driver_earning = float(db_order.total_fare) - float(platform_fee)
+
+        if payment_mode == "online":
+            # Record what the driver actually earned after the subtraction
+            db.add(
+                Transaction(
+                    driver_id=current_driver.id,
+                    order_id=db_order.id,
+                    amount=driver_earning,
+                    transaction_type="EARNING",
+                    payment_mode="online",
+                )
+            )
+        else:
+            # COD flow: Driver has the full cash, but owes you the subtracted amount
+            db.add(
+                Transaction(
+                    driver_id=current_driver.id,
+                    order_id=db_order.id,
+                    amount=db_order.total_fare,
+                    transaction_type="CASH_COLLECTED",
+                    payment_mode="cod",
+                )
+            )
+
+            db.add(
+                Transaction(
+                    driver_id=current_driver.id,
+                    order_id=db_order.id,
+                    amount=platform_fee,
+                    transaction_type="COMMISSION",
+                    payment_mode="cod",
+                )
+            )
+
+    db_order.status = new_status
     db.commit()
 
     background_tasks.add_task(
         parcel_ws_manager.broadcast_to_order,
         order_id,
-        {"event": "STATUS_UPDATE", "status": payload.status},
+        {"event": "status_update", "status": new_status},
     )
 
-    return {"message": "Status updated", "order_id": order_id, "status": payload.status}
+    return {"message": "status updated", "order_id": order_id, "status": new_status}
 
 
 @router.websocket("/ws/location/{order_id}")

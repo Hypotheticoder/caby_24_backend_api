@@ -1,6 +1,6 @@
+from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
 
 
 class DriverBase(BaseModel):
@@ -29,6 +29,11 @@ class DriverBase(BaseModel):
     puc_certificate_url: Optional[str] = None
     rating: Optional[float] = 0.0
     total_deliveries: Optional[int] = 0
+    bank_account_name: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    bank_ifsc_code: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_updated_at: Optional[datetime] = None
 
 
 class DriverCreate(DriverBase):
@@ -58,9 +63,21 @@ class DriverUpdate(BaseModel):
     puc_certificate_url: Optional[str] = None
     rating: Optional[float] = None
     total_deliveries: Optional[int] = None
+    bank_account_name: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    bank_ifsc_code: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_updated_at: Optional[datetime] = None
 
 
 class DriverRead(DriverBase):
     id: str
     created_at: datetime
     model_config = {"from_attributes": True}
+
+
+class BankDetailPayload(BaseModel):
+    account_name: str
+    account_number: str
+    ifsc_code: str
+    bank_name: str

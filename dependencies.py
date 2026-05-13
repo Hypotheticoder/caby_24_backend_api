@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import os
-import base64
-import json
-from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException
@@ -49,58 +46,10 @@ def verify_firebase_token(
         prefix = token[:15]
         print(f"🔥 RECEIVED TOKEN: {prefix}... (Length: {len(token)})")
 
-    # Dev-only escape hatch: allow running the app without Firebase Admin credentials.
-    # WARNING: Do not enable this in production.
-    if os.getenv("FIREBASE_AUTH_DISABLED") == "1":
-        try:
-            parts = token.split(".")
-            if len(parts) < 2:
-                raise ValueError("malformed token")
-            payload_b64 = parts[1] + "==="
-            payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8"))
-            payload = json.loads(payload_json.decode("utf-8"))
-            # Firebase tokens typically use `user_id` and `sub` as UID.
-            uid = payload.get("user_id") or payload.get("sub")
-            if uid:
-                payload["uid"] = uid
-            return payload
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
     try:
-        import firebase_admin
-        from firebase_admin import auth, credentials
+        from firebase_admin import auth
     except Exception:
         raise HTTPException(status_code=500, detail="firebase-admin is not installed")
-
-    if not firebase_admin._apps:
-        try:
-            # Prefer explicit service-account path via env.
-            cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if cred_path:
-                firebase_admin.initialize_app(credentials.Certificate(cred_path))
-            else:
-                # Local-dev fallback: if a service account file exists in the project root,
-                # initialize using it.
-                project_root = Path(__file__).resolve().parent
-                default_paths = [
-                    project_root / "service-account.json.",
-                    project_root / "service-account.json",
-                ]
-                for candidate in default_paths:
-                    if candidate.exists() and candidate.is_file():
-                        firebase_admin.initialize_app(credentials.Certificate(str(candidate)))
-                        break
-                else:
-                    firebase_admin.initialize_app()
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Firebase not configured. Set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file "
-                    f"and restart the server. ({e})"
-                ),
-            )
 
     try:
         return auth.verify_id_token(token)
