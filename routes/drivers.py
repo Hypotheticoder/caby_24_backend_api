@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 
+from core.security_logic import PlatformGuard, r
 from core.uploads import ensure_driver_upload_dir, save_upload_file, uploaded_file_url_path
 from crud.driver import (
     create_driver,
@@ -595,6 +596,11 @@ def accept_job(
     current_driver=Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
+    driver_id_str = str(current_driver.id)
+    is_banned, msg = PlatformGuard.check_ban(driver_id_str)
+    if is_banned:
+        raise HTTPException(status_code=403, detail=msg)
+
     updated_order = crud_customer_order.assign_driver_to_order(
         db=db,
         order_id=order_id,
@@ -636,6 +642,32 @@ class StatusUpdate(BaseModel):
     otp: Optional[str] = None
 
 
+@router.post("/drivers/{driver_id}/ban")
+def manual_driver_ban(
+    driver_id: str,
+    hours: int = Query(24, description="How many hours to ban?"),
+    reason: str = Query(
+        "Policy Violation",
+        description="Why are they banned? e.g., 'Rude to customer'",
+    ),
+    # In production, add your admin token verification here!
+    # current_admin = Depends(verify_admin_token)
+):
+    ban_key = f"ban:driver:{driver_id}"
+
+    # 1. Convert hours to seconds for Redis
+    total_seconds = hours * 3600
+
+    # 2. Drop the lock! r.setex creates the key, sets the timer, and stores the reason string
+    r.setex(ban_key, total_seconds, reason)
+
+    return {
+        "status": "success",
+        "message": f"Driver locked out for {hours} hours.",
+        "reason": reason,
+    }
+
+
 @router.get("/jobs/available", response_model=list[CustomerOrderRead])
 def available_jobs(
     driver_lat: float = Query(..., description="Driver's live latitude from Flutter"),
@@ -647,6 +679,11 @@ def available_jobs(
     current_driver=Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
+    driver_id_str = str(current_driver.id)
+    is_banned, msg = PlatformGuard.check_ban(driver_id_str)
+    if is_banned:
+        raise HTTPException(status_code=403, detail=msg)
+
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
 
     # 1. Grab the raw vehicle type (e.g., "BIKE")
@@ -834,4 +871,20 @@ async def driver_location_ws(
                 db.rollback()
     except WebSocketDisconnect:
         return
+
+
+@router.post("/{driver_id}/unsuspend")
+def lift_driver_suspension(driver_id: str):
+    driver_id_str = str(driver_id)
+
+    ban_key = f"ban:driver:{driver_id_str}"
+    history_key = f"cancellations:driver:{driver_id_str}"
+
+    r.delete(ban_key)
+    r.delete(history_key)
+
+    return {
+        "status": "success",
+        "message": "Suspension lifted. Cancellation strikes reset to 0.",
+    }
 

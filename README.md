@@ -81,7 +81,9 @@ These are important “gotchas” for future devs.
 
 2. **`main.py` creates tables on startup**
    - `main.py` runs `Base.metadata.create_all(bind=engine)` on app startup.
-   - This is convenient for dev, but in production it can conflict with migration-only workflows.
+  **Safety controls**:
+    - `core/security_logic.py` (`PlatformGuard`) enforces cancellation limits and driver suspensions using Redis.
+    - Ban checks are enforced in driver job discovery and acceptance.
 
 3. **WebSocket state is in-memory**
    - `ParcelTrackingManager.active_rooms` is a Python dict in `routes/customer_orders.py`.
@@ -105,6 +107,9 @@ These are important “gotchas” for future devs.
 
 ## Environment variables
 
+  7. **Redis is required for suspension logic**
+     - `core/security_logic.py` connects to Redis at `localhost:6379` (hardcoded).
+     - Cancellation limits and bans depend on Redis keys like `ban:driver:<id>` and `cancellations:driver:<id>`.
 ### Required (DB)
 
 These must exist for both app startup and Alembic migrations:
@@ -121,15 +126,14 @@ These must exist for both app startup and Alembic migrations:
   - `GOOGLE_APPLICATION_CREDENTIALS` (path to Firebase service account JSON)
   - `FIREBASE_AUTH_DISABLED=1` (dev-only escape hatch: skips real verification)
   - `AUTH_DEBUG=1` (more verbose auth error details)
+  | `redis` | Redis client | `core/security_logic.py` (suspensions + cancellation windows) |
 
 - SMS OTP
   - `FAST2SMS_API_KEY` (if missing, OTP is printed to console)
-
-- PayU
-  - `PAYU_MERCHANT_KEY`
-  - `PAYU_MERCHANT_SALT`
-
-- Delivery routing
+  - `POST /customer_orders/{order_id}/cancel`
+    - Normalizes `user_id` (Firebase UID vs DB UUID for drivers)
+    - Enforces ban checks via `PlatformGuard`
+    - Driver cancellations free the order first, then apply suspension checks
   - `OSRM_URL` (default `http://router.project-osrm.org`)
   - `OSRM_BASE_FARE` (default `30.0`)
   - `OSRM_PER_KM` (default `15.0`)
@@ -321,6 +325,25 @@ sequenceDiagram
   end
 ```
 
+Cancellation guard flow:
+
+```mermaid
+flowchart TD
+  Start[Cancel request] --> Load[Load order by id]
+  Load --> Exists{Order exists?}
+  Exists -- no --> NotFound[404 Not found]
+  Exists -- yes --> Status{Picked up?}
+  Status -- yes --> Block[403 Cannot cancel]
+  Status -- no --> Normalize[Normalize user_id]
+  Normalize --> BanCheck{Driver ban?}
+  BanCheck -- yes --> Ban[403 Suspended]
+  BanCheck -- no --> Free[Free order (driver) or cancel (customer)]
+  Free --> Commit[Commit DB updates]
+  Commit --> Limit[Check cancellation limit]
+  Limit -- exceeded --> Suspended[403 Suspension / daily limit]
+  Limit -- ok --> Done[200 Success]
+```
+
 ### Customer orders (`routes/customer_orders.py`)
 
 - `POST /customer_orders/create`
@@ -379,6 +402,8 @@ Jobs:
 - `GET /drivers/jobs/available`
 - `POST /drivers/jobs/{order_id}/accept`
 - `PUT /drivers/jobs/{order_id}/status` (validates pickup/drop OTP on certain statuses)
+- `POST /drivers/{driver_id}/ban` (manual suspension via Redis)
+- `POST /drivers/{driver_id}/unsuspend` (clears ban + cancellation history)
 
 #### WebSocket: driver location
 

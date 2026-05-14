@@ -317,11 +317,10 @@ def cancel_order(
     user_id: str = Query(...), 
     db: Session = Depends(get_db)
 ):
-    # Dynamically import to avoid circular dependencies (matching your file's style)
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
-    
+
     db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
-    
+
     if not db_order:
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -329,25 +328,52 @@ def cancel_order(
     if db_order.status.upper() in ["PICKED_UP", "ON_THE_WAY", "DELIVERED", "COMPLETED"]:
         raise HTTPException(status_code=403, detail="Order already picked up. Cannot cancel now.")
 
-    # RULE 2: Driver Ban Check
+    # RULE 2: Driver Ban Check & ID Normalization
+    resolved_user_id = str(user_id)
+
     if user_type == "driver":
-        is_banned, msg = PlatformGuard.check_ban(user_id)
+        DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
+        driver = db.query(DriverModel).filter(DriverModel.firebase_uid == user_id).first()
+
+        if not driver and len(user_id) == 36 and "-" in user_id:
+            driver = db.query(DriverModel).filter(DriverModel.id == user_id).first()
+
+        if driver:
+            resolved_user_id = str(driver.id)
+
+        is_banned, msg = PlatformGuard.check_ban(resolved_user_id)
         if is_banned:
             raise HTTPException(status_code=403, detail=msg)
 
-    # RULE 3: Rolling Window Limits
+    # RULE 3: FREE THE ORDER FIRST!
+    # We must update the database BEFORE we throw any suspension errors.
+    if user_type == "driver":
+        # Driver cancelled: Release the job back to the map for other drivers!
+        db_order.status = "PENDING"
+        db_order.assigned_driver_id = None
+        db_order.assigned_driver_name = None
+        db_order.assigned_driver_phone = None
+    else:
+        # Customer cancelled: Kill the order completely
+        db_order.status = "CANCELLED"
+
+    # Save the un-assignment to the database instantly
+    db.commit()
+
+    # RULE 4: Check if they should be suspended
     limit = 2 if user_type == "driver" else 4
-    can_cancel = PlatformGuard.attempt_cancellation(user_type, user_id, limit)
-    
+    can_cancel = PlatformGuard.attempt_cancellation(user_type, resolved_user_id, limit)
+
+    # NOW we throw the error!
+    # (The order is already freed, so the deadlock is avoided)
     if not can_cancel:
         if user_type == "driver":
             raise HTTPException(status_code=403, detail="Limit reached! Account suspended for 24 hours.")
         else:
-            raise HTTPException(status_code=403, detail="Daily cancellation limit reached (4/4). Try again tomorrow.")
-
-    # Execute Cancellation
-    db_order.status = "CANCELLED"
-    db.commit()
+            raise HTTPException(
+                status_code=403,
+                detail="Daily cancellation limit reached (4/4). Try again tomorrow.",
+            )
 
     return {"status": "success", "message": "Order cancelled successfully"}
 
