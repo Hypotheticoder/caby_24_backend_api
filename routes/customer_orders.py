@@ -1,5 +1,5 @@
 import json
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
@@ -19,35 +19,8 @@ import crud.customer_order as crud_customer_order
 from models.earnings_config import EarningsConfig
 from dependencies import get_current_user
 from models.user import User
-from core.security_logic import PlatformGuard
-
-
-# Real-time tracking manager for customers watching an order
-class ParcelTrackingManager:
-    def __init__(self):
-        # Maps order_id -> list of active WebSocket connections
-        self.active_rooms: dict[str, list[WebSocket]] = {}
-
-    async def connect(self, websocket: WebSocket, order_id: str):
-        await websocket.accept()
-        if order_id not in self.active_rooms:
-            self.active_rooms[order_id] = []
-        self.active_rooms[order_id].append(websocket)
-
-    def disconnect(self, websocket: WebSocket, order_id: str):
-        if order_id in self.active_rooms and websocket in self.active_rooms[order_id]:
-            self.active_rooms[order_id].remove(websocket)
-
-    async def broadcast_to_order(self, order_id: str, message: dict):
-        if order_id in self.active_rooms:
-            for connection in list(self.active_rooms[order_id]):
-                try:
-                    await connection.send_json(message)
-                except Exception:
-                    self.disconnect(connection, order_id)
-
-
-parcel_ws_manager = ParcelTrackingManager()
+from api.websockets.parcel_ws import parcel_ws_manager
+from core.security_logic import PlatformGuard, r
 
 
 router = APIRouter(prefix="/customer_orders", tags=["customer_orders"])
@@ -310,71 +283,139 @@ def switch_order_to_cod(order_id: str, db: Session = Depends(get_db)):
     return {"message": "Switched to COD successfully", "status": "PENDING"}
 
 
+@router.websocket("/ws/cancel/{order_id}")
+async def cancel_listener_ws(websocket: WebSocket, order_id: str):
+    try:
+        await parcel_ws_manager.connect(websocket, order_id)
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        parcel_ws_manager.disconnect(websocket, order_id)
+    except Exception as e:
+        print(f"Cancel WS Error: {e}")
+        parcel_ws_manager.disconnect(websocket, order_id)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @router.post("/{order_id}/cancel")
 def cancel_order(
-    order_id: str, 
+    order_id: str,
+    background_tasks: BackgroundTasks,
     user_type: str = Query(..., description="'customer' or 'driver'"),
-    user_id: str = Query(...), 
-    db: Session = Depends(get_db)
+    user_id: str = Query(...),
+    db: Session = Depends(get_db),
 ):
     CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
 
     db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
-
     if not db_order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # RULE 1: No cancellations after pickup
     if db_order.status.upper() in ["PICKED_UP", "ON_THE_WAY", "DELIVERED", "COMPLETED"]:
         raise HTTPException(status_code=403, detail="Order already picked up. Cannot cancel now.")
 
-    # RULE 2: Driver Ban Check & ID Normalization
+    # 1. THE SHIELD: Translate Firebase UID to Database UUID safely
     resolved_user_id = str(user_id)
-
     if user_type == "driver":
         DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
         driver = db.query(DriverModel).filter(DriverModel.firebase_uid == user_id).first()
-
         if not driver and len(user_id) == 36 and "-" in user_id:
             driver = db.query(DriverModel).filter(DriverModel.id == user_id).first()
-
         if driver:
             resolved_user_id = str(driver.id)
 
+        # Check if they are already banned
         is_banned, msg = PlatformGuard.check_ban(resolved_user_id)
         if is_banned:
             raise HTTPException(status_code=403, detail=msg)
 
-    # RULE 3: FREE THE ORDER FIRST!
-    # We must update the database BEFORE we throw any suspension errors.
+    # 2. THE BOUNCE & BLACKLIST: Free the order!
     if user_type == "driver":
-        # Driver cancelled: Release the job back to the map for other drivers!
+        # Add to Driver's Redis Blacklist (expires in 24h)
+        rejected_key = f"rejected:driver:{resolved_user_id}"
+        r.sadd(rejected_key, order_id)
+        r.expire(rejected_key, 86400)
+
+        # Release job back to map
         db_order.status = "PENDING"
         db_order.assigned_driver_id = None
         db_order.assigned_driver_name = None
         db_order.assigned_driver_phone = None
-    else:
-        # Customer cancelled: Kill the order completely
-        db_order.status = "CANCELLED"
 
-    # Save the un-assignment to the database instantly
+        # 🚨 FIRE THE WEBSOCKET TO THE CUSTOMER!
+        background_tasks.add_task(
+            parcel_ws_manager.broadcast_to_order,
+            order_id,
+            {
+                "event": "DRIVER_CANCELLED",
+                "status": "PENDING",
+                "message": "Driver unassigned. Finding a new delivery partner...",
+            },
+        )
+    else:
+        # Customer cancelled
+        db_order.status = "CANCELLED"
+        background_tasks.add_task(
+            parcel_ws_manager.broadcast_to_order,
+            order_id,
+            {"event": "CUSTOMER_CANCELLED", "status": "CANCELLED"},
+        )
+
+        if db_order.assigned_driver_id:
+            from routes.drivers import driver_ws_manager
+
+            DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
+            assigned_driver = (
+                db.query(DriverModel)
+                .filter(DriverModel.id == db_order.assigned_driver_id)
+                .first()
+            )
+
+            if assigned_driver:
+                background_tasks.add_task(
+                    driver_ws_manager.send_personal_message,
+                    assigned_driver.firebase_uid,
+                    {
+                        "event": "CUSTOMER_CANCELLED",
+                        "status": "CANCELLED",
+                        "order_id": order_id,
+                    },
+                )
+
     db.commit()
 
-    # RULE 4: Check if they should be suspended
+    # 3. THE PUNISHMENT: Check limits and ban if needed
     limit = 2 if user_type == "driver" else 4
     can_cancel = PlatformGuard.attempt_cancellation(user_type, resolved_user_id, limit)
 
-    # NOW we throw the error!
-    # (The order is already freed, so the deadlock is avoided)
     if not can_cancel:
         if user_type == "driver":
             raise HTTPException(status_code=403, detail="Limit reached! Account suspended for 24 hours.")
         else:
             raise HTTPException(
                 status_code=403,
-                detail="Daily cancellation limit reached (4/4). Try again tomorrow.",
+                detail="Daily cancellation limit reached. Try again tomorrow.",
             )
 
     return {"status": "success", "message": "Order cancelled successfully"}
+
+
+@router.post("/customers/{customer_id}/unsuspend")
+def lift_customer_suspension(customer_id: str):
+    customer_id_str = str(customer_id)
+
+    ban_key = f"ban:customer:{customer_id_str}"
+    history_key = f"cancellations:customer:{customer_id_str}"
+
+    r.delete(ban_key)
+    r.delete(history_key)
+
+    return {
+        "status": "success",
+        "message": "Customer suspension lifted. Cancellation strikes reset to 0.",
+    }
 
 

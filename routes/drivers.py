@@ -21,6 +21,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.responses import RedirectResponse
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -51,11 +52,36 @@ from schemas.transaction import (
     TransactionRead,
 )
 
-from routes.customer_orders import is_currently_peak_time, parcel_ws_manager
+from api.websockets.parcel_ws import parcel_ws_manager
+from routes.customer_orders import is_currently_peak_time
 from models.earnings_config import EarningsConfig
 from models.transaction import Transaction
 
 router = APIRouter(prefix="/drivers", tags=["drivers"])
+
+
+class DriverGlobalWSManager:
+    def __init__(self):
+        self.active_connections: dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, driver_id: str):
+        self.active_connections[driver_id] = websocket
+
+    def disconnect(self, driver_id: str):
+        if driver_id in self.active_connections:
+            del self.active_connections[driver_id]
+
+    async def send_personal_message(self, driver_id: str, message: dict):
+        ws = self.active_connections.get(driver_id)
+        if ws:
+            try:
+                await ws.send_json(message)
+            except Exception as e:
+                print(f"Failed to send to driver {driver_id}: {e}")
+                self.disconnect(driver_id)
+
+
+driver_ws_manager = DriverGlobalWSManager()
 
 
 @router.post("/create", response_model=DriverRead, status_code=status.HTTP_201_CREATED)
@@ -727,15 +753,21 @@ def available_jobs(
         )
     )
 
+    rejected_key = f"rejected:driver:{driver_id_str}"
+    rejected_ids = list(r.smembers(rejected_key) or [])
+
     # 5. Master Query
     query = db.query(CustomerOrder).filter(
         func.lower(CustomerOrder.status) == "pending",
         CustomerOrder.assigned_driver_id.is_(None),
         CustomerOrder.vehicle_type.in_(allowed_vehicle_types),
         distance_expr <= dynamic_radius,
-    ).order_by(
-        distance_expr.asc()
     )
+
+    if rejected_ids:
+        query = query.filter(CustomerOrder.id.notin_(rejected_ids))
+
+    query = query.order_by(distance_expr.asc())
 
     return query.offset(skip).limit(limit).all()
 
@@ -871,6 +903,34 @@ async def driver_location_ws(
                 db.rollback()
     except WebSocketDisconnect:
         return
+
+
+@router.websocket("/ws")
+async def driver_global_ws(websocket: WebSocket, token: str = Query(...)):
+    await websocket.accept()
+    driver_id = None
+    try:
+        mock_credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        user_data = verify_firebase_token(mock_credentials)
+        driver_id = user_data.get("uid") or user_data.get("user_id")
+
+        await driver_ws_manager.connect(websocket, driver_id)
+        print(f"✅ Global WS Connected for Driver: {driver_id}")
+
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        if driver_id:
+            driver_ws_manager.disconnect(driver_id)
+        print(f"❌ Global WS Disconnected: {driver_id}")
+    except Exception as e:
+        print(f"❌ Global WS Error: {e}")
+        if driver_id:
+            driver_ws_manager.disconnect(driver_id)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @router.post("/{driver_id}/unsuspend")
