@@ -76,6 +76,25 @@ def verify_firebase_token(
         raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 
+def verify_raw_firebase_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    if credentials is None or not (credentials.credentials or "").strip():
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    token = credentials.credentials.strip()
+
+    try:
+        from firebase_admin import auth
+    except Exception:
+        raise HTTPException(status_code=500, detail="firebase-admin is not installed")
+
+    try:
+        return auth.verify_id_token(token)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Invalid Firebase token: {str(e)}")
+
+
 def get_current_user(
     decoded_token: dict = Depends(verify_firebase_token),
     db: Session = Depends(get_db),

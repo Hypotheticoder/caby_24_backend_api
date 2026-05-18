@@ -42,7 +42,7 @@ import crud.driver as crud_driver
 import crud.customer_order as crud_customer_order
 import crud.transaction as crud_transaction
 from db import get_db
-from dependencies import verify_firebase_token
+from dependencies import verify_firebase_token, verify_raw_firebase_token
 from schemas.driver import BankDetailPayload, DriverCreate, DriverRead, DriverUpdate
 from schemas.customer_order import CustomerOrderRead
 from schemas.transaction import (
@@ -137,15 +137,22 @@ def get_driver_route(driver_id: str, db: Session = Depends(get_db)):
 def patch_driver_route(
     driver_id: str,
     payload: DriverUpdate,
-    decoded_token: dict = Depends(verify_firebase_token),
+    firebase_user: dict = Depends(verify_raw_firebase_token),
     db: Session = Depends(get_db),
 ):
     driver = get_driver(db, driver_id)
     if driver is None:
         raise HTTPException(status_code=404, detail="Driver not found")
 
-    if driver.firebase_uid != decoded_token.get("uid"):
-        raise HTTPException(status_code=403, detail="Not authorized to modify this profile")
+    token_phone = firebase_user.get("phone_number") or firebase_user.get("phone")
+    driver_phone = str(driver.phone_number or "").strip()
+    token_phone = str(token_phone or "").strip()
+
+    if not token_phone or not driver_phone:
+        raise HTTPException(status_code=403, detail="Phone number mismatch. Cannot hijack account.")
+
+    if token_phone not in driver_phone and driver_phone not in token_phone:
+        raise HTTPException(status_code=403, detail="Phone number mismatch. Cannot hijack account.")
 
     return update_driver(db, driver, payload)
 
@@ -230,6 +237,27 @@ def get_my_driver_profile(current_driver=Depends(get_current_driver)):
     It automatically decrypts the token and returns the Driver row.
     """
     return current_driver
+
+
+@router.post("/me/logout")
+def logout_driver(
+    db: Session = Depends(get_db),
+    current_driver=Depends(get_current_driver),
+):
+    try:
+        current_driver.live_status = "offline"
+        current_driver.fcm_device_token = None
+        db.commit()
+        return {
+            "status": "success",
+            "message": "Driver logged out and safely taken offline.",
+        }
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process logout teardown.",
+        )
 
 
 @router.get("/me/bank-details")
