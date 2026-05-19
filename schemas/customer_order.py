@@ -50,9 +50,13 @@ class CustomerOrderCreate(BaseModel):
     pickup_address: str
     pickup_lat: float
     pickup_lng: float
+    pickup_contact_name: Optional[str] = None
+    pickup_contact_phone: Optional[str] = None
     drop_address: str
     drop_lat: float
     drop_lng: float
+    drop_contact_name: Optional[str] = None
+    drop_contact_phone: Optional[str] = None
 
     # Logistics (Flutter must send these on confirm)
     distance_km: float

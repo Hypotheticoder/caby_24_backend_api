@@ -314,8 +314,8 @@ def cancel_order(
     if not db_order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if db_order.status.upper() in ["PICKED_UP", "ON_THE_WAY", "DELIVERED", "COMPLETED"]:
-        raise HTTPException(status_code=403, detail="Order already picked up. Cannot cancel now.")
+    if db_order.status.upper() in ["ARRIVED", "PICKED_UP", "ON_THE_WAY", "EN_ROUTE", "DELIVERED", "COMPLETED"]:
+        raise HTTPException(status_code=403, detail="Driver has arrived or order is in progress. Cannot cancel now.")
 
     # 1. THE SHIELD: Translate Firebase UID to Database UUID safely
     resolved_user_id = str(user_id)
