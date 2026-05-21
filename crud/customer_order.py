@@ -27,6 +27,7 @@ def create_customer_order(
     user_id: str,
     secure_base_fare: float,
     secure_distance_charge: float,
+    secure_gst_amount: float,
     secure_total_fare: float,
     secure_platform_commission: float,
     secure_driver_payout: float,
@@ -40,9 +41,25 @@ def create_customer_order(
 
     data["user_id"] = user_id
 
+    # Fall back to user's registered name and phone if contact fields are empty
+    from models.user import User
+    db_user = db.query(User).filter(User.id == user_id).first()
+    user_name = db_user.name if db_user else "Customer"
+    user_phone = db_user.phone if db_user else ""
+
+    if not data.get("pickup_contact_name") or str(data.get("pickup_contact_name")).strip() == "":
+        data["pickup_contact_name"] = user_name
+    if not data.get("pickup_contact_phone") or str(data.get("pickup_contact_phone")).strip() == "":
+        data["pickup_contact_phone"] = user_phone
+    if not data.get("drop_contact_name") or str(data.get("drop_contact_name")).strip() == "":
+        data["drop_contact_name"] = user_name
+    if not data.get("drop_contact_phone") or str(data.get("drop_contact_phone")).strip() == "":
+        data["drop_contact_phone"] = user_phone
+
     # 🔒 THE SECURITY LOCK: Force the backend prices
     data["base_fare"] = secure_base_fare
     data["distance_charge"] = secure_distance_charge
+    data["gst_amount"] = secure_gst_amount
     data["total_fare"] = secure_total_fare
     data["platform_commission"] = secure_platform_commission
     data["driver_payout"] = secure_driver_payout

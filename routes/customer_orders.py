@@ -63,18 +63,21 @@ def calculate_fare_endpoint(request: FareEstimateRequest, db: Session = Depends(
     if not config:
         raise HTTPException(status_code=400, detail="Pricing not found for this vehicle.")
 
-    # Calculate exact math
     distance_charge = request.distance_km * config.per_km_rate
     raw_fare = config.base_fare + distance_charge
-    final_fare = max(raw_fare, config.minimum_fare)
+    base_delivery_fee = max(raw_fare, config.minimum_fare)
+
+    gst_amount = round(base_delivery_fee * 0.18, 2)
+    final_total = round(base_delivery_fee + gst_amount, 2)
 
     return FareEstimateResponse(
         is_peak_time=peak_status,
         base_fare=config.base_fare,
         per_km_rate=config.per_km_rate,
         distance_charge=distance_charge,
-        minimum_fare_applied=(final_fare == config.minimum_fare),
-        total_fare=final_fare
+        minimum_fare_applied=(base_delivery_fee == config.minimum_fare),
+        gst_amount=gst_amount,
+        total_fare=final_total,
     )
 
 
@@ -109,14 +112,18 @@ def calculate_all_fares_endpoint(request: AllFaresRequest, db: Session = Depends
     for config in configs:
         distance_charge = request.distance_km * config.per_km_rate
         raw_fare = config.base_fare + distance_charge
-        actual_total = max(raw_fare, config.minimum_fare)
+        base_delivery_fee = max(raw_fare, config.minimum_fare)
+
+        gst_amount = round(base_delivery_fee * 0.18, 2)
+        final_total = round(base_delivery_fee + gst_amount, 2)
 
         available_rides.append(
             {
                 "service_type": config.service_type,
                 "base_fare": config.base_fare,
                 "per_km_rate": config.per_km_rate,
-                "total_fare": actual_total,
+                "gst_amount": gst_amount,
+                "total_fare": final_total,
                 "is_peak_time": peak_status,
                 "max_weight": config.max_weight_kg, # 👈 Pass it back to Flutter
             }
@@ -150,12 +157,15 @@ async def create_customer_order_endpoint(
     secure_base_fare = float(config.base_fare)
     secure_distance_charge = float(order.distance_km) * float(config.per_km_rate)
     raw_fare = secure_base_fare + secure_distance_charge
-    secure_total_fare = max(raw_fare, float(config.minimum_fare))
+    base_delivery_fee = max(raw_fare, float(config.minimum_fare))
+
+    secure_gst_amount = round(base_delivery_fee * 0.18, 2)
+    secure_total_fare = round(base_delivery_fee + secure_gst_amount, 2)
 
     # Commission & payout
     # `platform_commission` is treated as a fixed amount (e.g., 10.0 = ₹10).
-    secure_platform_commission = min(float(config.platform_commission), secure_total_fare)
-    secure_driver_payout = max(0.0, secure_total_fare - secure_platform_commission)
+    secure_platform_commission = min(float(config.platform_commission), base_delivery_fee)
+    secure_driver_payout = max(0.0, base_delivery_fee - secure_platform_commission)
 
     # 🚨 THE PAYMENT SHIELD
     payment_method = (order.payment_method or "").lower()
@@ -171,6 +181,7 @@ async def create_customer_order_endpoint(
         user_id=current_user.id,
         secure_base_fare=secure_base_fare,
         secure_distance_charge=secure_distance_charge,
+        secure_gst_amount=secure_gst_amount,
         secure_total_fare=secure_total_fare,
         secure_platform_commission=secure_platform_commission,
         secure_driver_payout=secure_driver_payout,
@@ -238,6 +249,35 @@ def list_customer_orders(
         .limit(limit)
         .all()
     )
+
+
+@router.get("/me/active", response_model=Optional[CustomerOrderRead])
+def get_my_active_order(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    active_statuses = [
+        "PENDING",
+        "ACCEPTED",
+        "ARRIVED",
+        "PICKED_UP",
+        "ON_THE_WAY",
+        "EN_ROUTE",
+    ]
+
+    active_order = (
+        db.query(CustomerOrder)
+        .filter(
+            CustomerOrder.user_id == current_user.id,
+            CustomerOrder.status.in_(active_statuses),
+        )
+        .order_by(CustomerOrder.created_at.desc())
+        .first()
+    )
+
+    return active_order
 
 
 @router.get("/{order_id}", response_model=CustomerOrderRead)

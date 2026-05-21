@@ -29,6 +29,7 @@ class CustomerOrderBase(BaseModel):
     base_fare: float
     distance_km: float
     distance_charge: float
+    gst_amount: float
     total_fare: float
 
     payment_method: str
@@ -135,7 +136,8 @@ class FareEstimateResponse(BaseModel):
     per_km_rate: float
     distance_charge: float
     minimum_fare_applied: bool
-    total_fare: float    
+    gst_amount: float
+    total_fare: float
 
 
 # --- ALL VEHICLE FARES (Uber/Rapido-style list) ---
@@ -152,6 +154,7 @@ class VehicleFareItem(BaseModel):
     service_type: str
     base_fare: float
     per_km_rate: float
+    gst_amount: float
     total_fare: float
     is_peak_time: bool
     

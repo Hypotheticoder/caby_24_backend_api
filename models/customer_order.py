@@ -49,6 +49,7 @@ class CustomerOrder(Base):
     distance_km = Column(Float, nullable=False)
     distance_charge = Column(Float, nullable=False)
     total_fare = Column(Float, nullable=False)
+    gst_amount = Column(Float, default=0.0)
 
     # Driver's exact cut locked at order creation time
     driver_payout = Column(Float, nullable=True)
