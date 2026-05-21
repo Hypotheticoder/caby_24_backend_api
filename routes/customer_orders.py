@@ -67,7 +67,8 @@ def calculate_fare_endpoint(request: FareEstimateRequest, db: Session = Depends(
     raw_fare = config.base_fare + distance_charge
     base_delivery_fee = max(raw_fare, config.minimum_fare)
 
-    gst_amount = round(base_delivery_fee * 0.18, 2)
+    live_gst_decimal = float(config.gst_percentage) / 100.0
+    gst_amount = round(base_delivery_fee * live_gst_decimal, 2)
     final_total = round(base_delivery_fee + gst_amount, 2)
 
     return FareEstimateResponse(
@@ -114,7 +115,8 @@ def calculate_all_fares_endpoint(request: AllFaresRequest, db: Session = Depends
         raw_fare = config.base_fare + distance_charge
         base_delivery_fee = max(raw_fare, config.minimum_fare)
 
-        gst_amount = round(base_delivery_fee * 0.18, 2)
+        live_gst_decimal = float(config.gst_percentage) / 100.0
+        gst_amount = round(base_delivery_fee * live_gst_decimal, 2)
         final_total = round(base_delivery_fee + gst_amount, 2)
 
         available_rides.append(
@@ -159,7 +161,8 @@ async def create_customer_order_endpoint(
     raw_fare = secure_base_fare + secure_distance_charge
     base_delivery_fee = max(raw_fare, float(config.minimum_fare))
 
-    secure_gst_amount = round(base_delivery_fee * 0.18, 2)
+    live_gst_decimal = float(config.gst_percentage) / 100.0
+    secure_gst_amount = round(base_delivery_fee * live_gst_decimal, 2)
     secure_total_fare = round(base_delivery_fee + secure_gst_amount, 2)
 
     # Commission & payout

@@ -21,6 +21,8 @@ class EarningsConfig(Base):
     
     # The fixed commission amount from your document (e.g., ₹10 or ₹20)
     platform_commission = Column(Float, nullable=False) 
+
+    gst_percentage = Column(Float, nullable=False, default=18.0)
     
     max_weight_kg = Column(Float, nullable=False, default=9999.0)
     

@@ -47,7 +47,7 @@ class Driver(Base):
     bank_ifsc_code = Column(String, nullable=True)
     bank_name = Column(String, nullable=True)
     bank_updated_at = Column(DateTime, nullable=True)
-    cm_device_token = Column(String, nullable=True)
+    fcm_device_token = Column(String, nullable=True)
 
     assigned_orders = relationship("CustomerOrder", back_populates="driver")
 

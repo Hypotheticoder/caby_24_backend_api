@@ -13,6 +13,8 @@ class EarningsConfigBase(BaseModel):
     max_weight_kg: Optional[float] = None
     max_distance_km: Optional[float] = None
 
+    gst_percentage: float = 18.0
+
     # 🚨 Driver pickup search radius (km)
     pickup_radius_km: float = 10.0
 
@@ -24,6 +26,8 @@ class EarningsConfigUpdateRequest(BaseModel):
     platform_commission: Optional[float] = None
     max_weight_kg: Optional[float] = None
     max_distance_km: Optional[float] = None
+
+    gst_percentage: Optional[float] = None
 
     # 🚨 Allow admins to edit the radius
     pickup_radius_km: Optional[float] = None

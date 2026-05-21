@@ -106,6 +106,8 @@ class CustomerOrderRead(CustomerOrderBase):
 
     driver_payout: Optional[float] = None
 
+    gst_amount: Optional[float] = 0.0
+
     encoded_polyline: Optional[str] = None
     pickup_otp: Optional[str] = None
     drop_otp: Optional[str] = None

@@ -246,7 +246,7 @@ def logout_driver(
 ):
     try:
         current_driver.live_status = "offline"
-        current_driver.fcm_device_token = None
+        current_driver.fcm_token = None
         db.commit()
         return {
             "status": "success",
@@ -258,6 +258,21 @@ def logout_driver(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process logout teardown.",
         )
+
+
+class FCMTokenUpdate(BaseModel):
+    fcm_token: str
+
+
+@router.patch("/me/fcm-token")
+def update_fcm_token(
+    payload: FCMTokenUpdate,
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    current_driver.fcm_token = payload.fcm_token
+    db.commit()
+    return {"status": "success", "message": "FCM Token secured."}
 
 
 @router.get("/me/bank-details")
@@ -696,6 +711,10 @@ class StatusUpdate(BaseModel):
     otp: Optional[str] = None
 
 
+class PaymentStatusUpdate(BaseModel):
+    payment_status: str
+
+
 @router.post("/drivers/{driver_id}/ban")
 def manual_driver_ban(
     driver_id: str,
@@ -887,6 +906,36 @@ def update_job_status(
     )
 
     return {"message": "status updated", "order_id": order_id, "status": new_status}
+
+
+@router.put("/jobs/{order_id}/payment")
+def update_job_payment_status(
+    order_id: str,
+    payload: PaymentStatusUpdate,
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
+
+    if not db_order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if db_order.assigned_driver_id != current_driver.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to update this order's payment.",
+        )
+
+    db_order.payment_status = payload.payment_status.lower()
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Payment status updated to {payload.payment_status}",
+        "order_id": order_id,
+        "payment_status": db_order.payment_status,
+    }
 
 
 @router.websocket("/ws/location/{order_id}")
