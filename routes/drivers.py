@@ -289,6 +289,41 @@ def get_bank_details(current_driver=Depends(get_current_driver)):
     }
 
 
+@router.get("/me/earning-config")
+def get_my_earning_config(
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    if not current_driver.vehicle_type:
+        raise HTTPException(status_code=400, detail="Vehicle type not set for this driver.")
+
+    sanitized_vehicle = current_driver.vehicle_type.lower()
+
+    config = (
+        db.query(EarningsConfig)
+        .filter(
+            func.lower(EarningsConfig.service_type) == sanitized_vehicle,
+            EarningsConfig.is_peak_time == False,
+        )
+        .first()
+    )
+
+    if not config:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Pricing configuration not found for {sanitized_vehicle}",
+        )
+
+    return {
+        "service_type": config.service_type,
+        "base_fare": config.base_fare,
+        "per_km_rate": config.per_km_rate,
+        "minimum_fare": config.minimum_fare,
+        "platform_commission": config.platform_commission,
+        "gst_percentage": getattr(config, "gst_percentage", 18.0),
+    }
+
+
 @router.put("/me/bank-details")
 def update_bank_details(
     payload: BankDetailPayload,
