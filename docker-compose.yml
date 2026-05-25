@@ -31,7 +31,7 @@ services:
       PGADMIN_CONFIG_PROXY_X_FOR_COUNT: "1"
       PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: "1"
     ports:
-      - "8018:80"
+      - "8020:80"
     depends_on:
       - db
     networks:
@@ -48,7 +48,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
     ports:
-      - "8017:8017"
+      - "8019:8019"
     depends_on:
       - db
       - redis

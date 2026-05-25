@@ -19,8 +19,8 @@ COPY . .
 # Create uploads directory so the app doesn't fail on startup
 RUN mkdir -p /app/uploads /app/assets
 
-# Expose port 8017 for the FastAPI application
-EXPOSE 8017
+# Expose port 8019 for the FastAPI application
+EXPOSE 8019
 
 # Run migrations, then start the API server
-CMD ["sh", "-c", "python scripts/wait_for_db.py && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8017"]
+CMD ["sh", "-c", "python scripts/wait_for_db.py && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8019"]
