@@ -39,6 +39,10 @@ def verify_firebase_token(
             raise HTTPException(status_code=401, detail="Invalid authorization scheme")
         token = authorization.split(" ", 1)[1].strip()
 
+    # Bypass auth completely when Firebase is disabled (local development)
+    if os.getenv("FIREBASE_AUTH_DISABLED") == "1":
+        return {"uid": "dev_admin", "phone_number": "0000000000", "email": "admin@caby24.com"}
+    
     if not token:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 
@@ -103,6 +107,10 @@ def get_current_user(
 
     Expects Firebase phone-auth tokens so we can map `phone_number` -> `users.phone`.
     """
+
+    # Bypass for local development
+    if os.getenv("FIREBASE_AUTH_DISABLED") == "1":
+        return User(id="dev_admin", phone="0000000000")
 
     phone = decoded_token.get("phone_number") or decoded_token.get("phone")
     if not phone or not str(phone).strip():

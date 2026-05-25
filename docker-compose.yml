@@ -1,5 +1,4 @@
 version: '3.11'
-# version: '3.11'
 services:
   db:
     image: postgres:15
@@ -49,7 +48,6 @@ services:
 volumes:
   db_data:
   uploads_data:
-
 
 networks:
   caby24_backend_net:
