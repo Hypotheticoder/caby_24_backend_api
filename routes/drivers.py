@@ -693,6 +693,25 @@ def get_job_history(
     return results
 
 
+@router.get("/me/jobs/active", response_model=Optional[CustomerOrderRead])
+def get_active_job(
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    active_order = (
+        db.query(CustomerOrder)
+        .filter(
+            CustomerOrder.assigned_driver_id == current_driver.id,
+            ~func.lower(CustomerOrder.status).in_(["delivered", "cancelled"]),
+        )
+        .first()
+    )
+
+    return active_order
+
+
 @router.post("/jobs/{order_id}/accept")
 def accept_job(
     order_id: str,
