@@ -1,10 +1,16 @@
+import os
 import time
 import uuid
 
 import redis
 
-# Connect to your local Redis instance
-r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+# Configure Redis from environment for local or Docker usage.
+r = redis.Redis(
+    host=os.getenv("REDIS_HOST", "localhost"),
+    port=int(os.getenv("REDIS_PORT", "6379")),
+    db=0,
+    decode_responses=True,
+)
 
 
 class PlatformGuard:
