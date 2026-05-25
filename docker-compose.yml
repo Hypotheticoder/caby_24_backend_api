@@ -1,5 +1,13 @@
 version: '3.11'
 services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    networks:
+      - caby24_backend_net
+
   db:
     image: postgres:15
     restart: always
@@ -36,10 +44,14 @@ services:
     restart: always
     env_file:
       - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     ports:
       - "8017:8017"
     depends_on:
       - db
+      - redis
     networks:
       - caby24_backend_net
     volumes:
@@ -48,6 +60,7 @@ services:
 volumes:
   db_data:
   uploads_data:
+  redis_data:
 
 networks:
   caby24_backend_net:

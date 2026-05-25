@@ -871,6 +871,8 @@ def update_job_status(
 
     new_status = payload.status.lower()
 
+    payment_mode = (db_order.payment_method or "online").lower()
+
     # OTP checks (as usual)
     if new_status == "picked_up":
         if db_order.pickup_otp and payload.otp != db_order.pickup_otp:
@@ -879,10 +881,17 @@ def update_job_status(
         if db_order.drop_otp and payload.otp != db_order.drop_otp:
             raise HTTPException(status_code=400, detail="Invalid drop-off OTP")
 
+        if payment_mode == "cod" and (db_order.payment_status or "unpaid").lower() != "paid":
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Cash collection required! Mark payment as received before completing "
+                    "this delivery."
+                ),
+            )
+
     # Updated subtraction logic
     if new_status == "delivered" and db_order.status.lower() != "delivered":
-        payment_mode = (db_order.payment_method or "online").lower()
-
         platform_fee = db_order.platform_commission
         if platform_fee is None:
             peak_status = is_currently_peak_time(db)
