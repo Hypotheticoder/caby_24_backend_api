@@ -30,6 +30,7 @@ Base = declarative_base()
 
 # Ensure Alembic loads all models.
 from models.transaction import Transaction
+from models.global_settings import GlobalSetting
 
 def get_db():
     db = SessionLocal()

@@ -25,6 +25,8 @@ from routes.delivery import router as delivery_router
 from routes.webhooks import router as webhooks_router
 from routes.drivers import router as drivers_router
 from routes.search import router as search_router
+from routes.carousel_ads import router as carousel_ads_router
+from routes import settings
 from routes import global_timing
 
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +47,8 @@ app.include_router(delivery_router)
 app.include_router(webhooks_router)
 app.include_router(drivers_router)
 app.include_router(search_router)
+app.include_router(carousel_ads_router)
+app.include_router(settings.router)
 app.include_router(global_timing.router)
 
 app.add_middleware(
