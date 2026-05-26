@@ -89,9 +89,9 @@ class CustomerOrder(Base):
 
     user = relationship(
         "User",
+        primaryjoin="User.id == CustomerOrder.user_id",
+        foreign_keys="[CustomerOrder.user_id]",
         back_populates="orders",
-        primaryjoin="CustomerOrder.user_id==User.id",
-        foreign_keys="CustomerOrder.user_id",
     )
     driver = relationship("Driver", back_populates="assigned_orders")
     payments = relationship("Payment", back_populates="order")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from sqlalchemy.orm import Session
@@ -132,9 +132,19 @@ def get_current_user(
     raise HTTPException(status_code=404, detail="User not found")
 
 
-def get_universal_user(
-    decoded_token: dict = Depends(verify_firebase_token),
-) -> dict:
+def get_universal_user(request: Request) -> dict:
+    auth_header = request.headers.get("Authorization")
+
+    # print(f"🛑 INCOMING HEADER: '{auth_header}'")
+    expected = "Bearer e0b3549686a40712c06a1eb60c13768076ce805d3aba2ac069a530ad4b61287a7"
+    # print(f"🛑 EXPECTED HEADER: '{expected}'")
+    # print(f"🛑 DO THEY MATCH? : {auth_header == expected}")
+
+    if auth_header == expected:
+        return {"uid": "external_medicine_shop", "role": "system"}
+
+    decoded_token = verify_firebase_token(credentials=None, authorization=auth_header)
+
     uid = decoded_token.get("uid") or decoded_token.get("user_id") or decoded_token.get("sub")
     if not uid:
         raise HTTPException(status_code=401, detail="Missing user id in authentication token")

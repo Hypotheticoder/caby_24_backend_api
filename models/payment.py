@@ -9,7 +9,8 @@ class Payment(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     order_id = Column(String, ForeignKey("customer_orders.id"), nullable=False)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+# 💥 Removed ForeignKey so it accepts external system IDs!
+    user_id = Column(String, index=True, nullable=False)    
 
     # --- CORE MONEY DETAILS ---
     amount = Column(Float, nullable=False)
@@ -29,4 +30,9 @@ class Payment(Base):
 
     # --- RELATIONSHIPS ---
     order = relationship("CustomerOrder", back_populates="payments")
-    user = relationship("User", back_populates="payments")
+    user = relationship(
+        "User",
+        primaryjoin="User.id == Payment.user_id",
+        foreign_keys="[Payment.user_id]",
+        back_populates="payments",
+    )

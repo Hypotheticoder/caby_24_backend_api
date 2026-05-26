@@ -18,8 +18,14 @@ class User(Base):
 
     orders = relationship(
         "CustomerOrder",
+        primaryjoin="User.id == CustomerOrder.user_id",
+        foreign_keys="[CustomerOrder.user_id]",
         back_populates="user",
-        primaryjoin="User.id==CustomerOrder.user_id",
-        foreign_keys="CustomerOrder.user_id",
     )
-    payments = relationship("Payment", back_populates="user")
+
+    payments = relationship(
+        "Payment",
+        primaryjoin="User.id == Payment.user_id",
+        foreign_keys="[Payment.user_id]",
+        back_populates="user",
+    )
