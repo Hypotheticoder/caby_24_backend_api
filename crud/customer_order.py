@@ -25,6 +25,7 @@ def create_customer_order(
     db: Session,
     order: CustomerOrderCreate,
     user_id: str,
+    role: str,
     secure_base_fare: float,
     secure_distance_charge: float,
     secure_gst_amount: float,
@@ -42,10 +43,26 @@ def create_customer_order(
     data["user_id"] = user_id
 
     # Fall back to user's registered name and phone if contact fields are empty
-    from models.user import User
-    db_user = db.query(User).filter(User.id == user_id).first()
-    user_name = db_user.name if db_user else "Customer"
-    user_phone = db_user.phone if db_user else ""
+    user_name = "Customer"
+    user_phone = ""
+
+    if role == "medicine_shop":
+        from models.pharma_shop_user import PharmaShopUser
+
+        shop = db.query(PharmaShopUser).filter(PharmaShopUser.shop_id == user_id).first()
+        if shop:
+            user_name = shop.shop_name
+            user_phone = shop.shop_phone_no
+    elif role == "system":
+        user_name = "Partner App"
+        user_phone = "N/A"
+    else:
+        from models.user import User
+
+        db_user = db.query(User).filter(User.id == user_id).first()
+        if db_user:
+            user_name = db_user.name
+            user_phone = db_user.phone
 
     if not data.get("pickup_contact_name") or str(data.get("pickup_contact_name")).strip() == "":
         data["pickup_contact_name"] = user_name

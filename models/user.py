@@ -16,5 +16,10 @@ class User(Base):
     photo_url = Column(String, nullable=True) 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    orders = relationship("CustomerOrder", back_populates="user")
+    orders = relationship(
+        "CustomerOrder",
+        back_populates="user",
+        primaryjoin="User.id==CustomerOrder.user_id",
+        foreign_keys="CustomerOrder.user_id",
+    )
     payments = relationship("Payment", back_populates="user")

@@ -18,7 +18,7 @@ class CustomerOrder(Base):
     __tablename__ = "customer_orders"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    user_id = Column(String, index=True, nullable=False)
 
     # 1. Order Type
     order_type = Column(String, nullable=False)  # "parcel" or "ride"
@@ -87,6 +87,11 @@ class CustomerOrder(Base):
     assigned_driver_lng = Column(Float, nullable=True)
     last_location_update = Column(DateTime, nullable=True)
 
-    user = relationship("User", back_populates="orders")
+    user = relationship(
+        "User",
+        back_populates="orders",
+        primaryjoin="CustomerOrder.user_id==User.id",
+        foreign_keys="CustomerOrder.user_id",
+    )
     driver = relationship("Driver", back_populates="assigned_orders")
     payments = relationship("Payment", back_populates="order")

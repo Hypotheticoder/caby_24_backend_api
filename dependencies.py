@@ -130,3 +130,14 @@ def get_current_user(
             return user
 
     raise HTTPException(status_code=404, detail="User not found")
+
+
+def get_universal_user(
+    decoded_token: dict = Depends(verify_firebase_token),
+) -> dict:
+    uid = decoded_token.get("uid") or decoded_token.get("user_id") or decoded_token.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Missing user id in authentication token")
+
+    role = decoded_token.get("role", "user")
+    return {"uid": uid, "role": role}

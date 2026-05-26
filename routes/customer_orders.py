@@ -17,7 +17,7 @@ from schemas.customer_order import (
 )
 import crud.customer_order as crud_customer_order
 from models.earnings_config import EarningsConfig
-from dependencies import get_current_user
+from dependencies import get_current_user, get_universal_user
 from models.user import User
 from api.websockets.parcel_ws import parcel_ws_manager
 from core.security_logic import PlatformGuard, r
@@ -138,9 +138,14 @@ def calculate_all_fares_endpoint(request: AllFaresRequest, db: Session = Depends
 async def create_customer_order_endpoint(
     order: CustomerOrderCreate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user),
+    current_user: dict = Depends(get_universal_user),
     db: Session = Depends(get_db),
 ):
+    user_role = current_user.get("role", "user")
+    uid = current_user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Missing user id in authentication token")
     # 1. Fetch the exact price from admin-configured rules
     peak_status = is_currently_peak_time(db)
     config = (
@@ -181,7 +186,8 @@ async def create_customer_order_endpoint(
     db_order = crud_customer_order.create_customer_order(
         db,
         order,
-        user_id=current_user.id,
+        user_id=uid,
+        role=user_role,
         secure_base_fare=secure_base_fare,
         secure_distance_charge=secure_distance_charge,
         secure_gst_amount=secure_gst_amount,
