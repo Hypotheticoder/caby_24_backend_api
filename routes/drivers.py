@@ -23,7 +23,7 @@ from fastapi import (
 )
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.responses import RedirectResponse
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
@@ -79,6 +79,18 @@ class DriverGlobalWSManager:
             except Exception as e:
                 print(f"Failed to send to driver {driver_id}: {e}")
                 self.disconnect(driver_id)
+
+    async def broadcast(self, message: dict):
+        dead_connections = []
+        for driver_id, ws in self.active_connections.items():
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead_connections.append(driver_id)
+
+        # Clean up anyone who disconnected
+        for d_id in dead_connections:
+            self.disconnect(d_id)
 
 
 driver_ws_manager = DriverGlobalWSManager()
@@ -564,6 +576,64 @@ def get_wallet_statement(
     return formatted_statement
 
 
+@router.get("/me/earnings/history", response_model=List[TransactionRead])
+def get_earnings_history(
+    skip: int = 0,
+    limit: int = 10,
+    service_type: Optional[str] = Query("all"),
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    query = (
+        db.query(Transaction, CustomerOrder)
+        .outerjoin(CustomerOrder, Transaction.order_id == CustomerOrder.id)
+        .filter(Transaction.driver_id == current_driver.id)
+    )
+
+    if service_type and service_type.lower() != "all":
+        query = query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+
+    results = (
+        query.order_by(Transaction.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    formatted_history = []
+
+    for tx, order in results:
+        formatted_date = tx.created_at.strftime("%b %d, %I:%M %p")
+
+        title = "System Transaction"
+
+        if tx.transaction_type == "EARNING":
+            title = f"Payout for {order.order_type.capitalize()}" if order else "Bonus Payout"
+        elif tx.transaction_type == "COMMISSION":
+            title = "Platform Fee (COD)"
+        elif tx.transaction_type == "CASH_COLLECTED":
+            title = "Cash Collected from Customer"
+        elif tx.transaction_type == "PENALTY":
+            title = f"Penalty on Order {str(order.id)[:6]}" if order else "System Penalty"
+        elif tx.transaction_type == "SETTLEMENT":
+            title = "Paid to Company (Settle Up)"
+
+        formatted_history.append(
+            TransactionRead(
+                id=tx.id,
+                amount=tx.amount,
+                transaction_type=tx.transaction_type,
+                payment_mode=tx.payment_mode,
+                title=title,
+                date=formatted_date,
+            )
+        )
+
+    return formatted_history
+
+
 @router.get("/me/wallet/analytics", response_model=AnalyticsDashboard)
 def get_wallet_analytics(
     period: str = Query("weekly", enum=["daily", "weekly", "monthly"]),
@@ -667,9 +737,10 @@ def get_wallet_analytics(
 
 @router.get("/me/jobs/history", response_model=list[CustomerOrderRead])
 def get_job_history(
-    service_type: Optional[str] = Query("all", description="Filter by ride or parcel"),
     skip: int = 0,
-    limit: int = 50,
+    limit: int = 10,
+    order_type: Optional[str] = None,
+    service_type: Optional[str] = Query(None),
     current_driver=Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
@@ -677,20 +748,24 @@ def get_job_history(
 
     query = db.query(CustomerOrder).filter(
         CustomerOrder.assigned_driver_id == current_driver.id,
-        func.lower(CustomerOrder.status).in_(["delivered", "cancelled"]),
+        func.lower(CustomerOrder.status).in_(["completed", "delivered", "cancelled"]),
     )
 
-    if service_type and service_type.lower() != "all":
-        query = query.filter(CustomerOrder.order_type.ilike(f"%{service_type.lower()}%"))
+    type_filter = order_type or service_type
+    if type_filter:
+        query = query.filter(
+            or_(
+                CustomerOrder.order_type.ilike(f"%{type_filter}%"),
+                CustomerOrder.vehicle_type.ilike(f"%{type_filter}%"),
+            )
+        )
 
-    results = (
+    return (
         query.order_by(CustomerOrder.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()
     )
-
-    return results
 
 
 @router.get("/me/jobs/active", response_model=Optional[CustomerOrderRead])
@@ -748,6 +823,14 @@ def accept_job(
         },
     )
 
+    background_tasks.add_task(
+        driver_ws_manager.broadcast,
+        {
+            "event": "JOB_TAKEN",
+            "order_id": order_id,
+        },
+    )
+
     return {
         "message": "Job accepted",
         "order_id": order_id,
@@ -801,6 +884,7 @@ def available_jobs(
     driver_lng: float = Query(..., description="Driver's live longitude from Flutter"),
     accepts_rides: bool = Query(True, description="Flutter toggle for passenger rides"),
     accepts_parcels: bool = Query(True, description="Flutter toggle for parcel deliveries"),
+    accepts_medicine: bool = Query(True, description="Flutter toggle for medicine"),
     skip: int = 0,
     limit: int = 100,
     current_driver=Depends(get_current_driver),
@@ -836,6 +920,8 @@ def available_jobs(
         allowed_vehicle_types.append(sanitized_vehicle)
     if accepts_parcels:
         allowed_vehicle_types.append(f"parcel_{sanitized_vehicle}")
+    if accepts_medicine:
+        allowed_vehicle_types.append(f"medicine_{sanitized_vehicle}")
 
     if not allowed_vehicle_types:
         return []

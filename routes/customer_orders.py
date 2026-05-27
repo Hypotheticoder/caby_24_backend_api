@@ -9,6 +9,7 @@ from schemas.customer_order import (
     CustomerOrderRead,
     CustomerOrderUpdate,
 )
+from schemas.payment import PaymentRead
 from schemas.customer_order import (
     FareEstimateRequest,
     FareEstimateResponse,
@@ -197,32 +198,24 @@ async def create_customer_order_endpoint(
         status_override=desired_status,
     )
 
-    # 2. Package the data for the Driver Hub
-    # Notice how we bundle your specific parcel details into the 'requirements' dictionary!
-    hub_payload = {
-        "source_app": "PARCEL_APP",
-        "external_order_id": str(db_order.id), # The magic bridge ID
-        
-        "pickup_address": db_order.pickup_address,
-        "pickup_lat": db_order.pickup_lat,
-        "pickup_lng": db_order.pickup_lng,
-        "drop_address": db_order.drop_address,
-        "drop_lat": db_order.drop_lat,
-        "drop_lng": db_order.drop_lng,
-        "encoded_polyline": db_order.encoded_polyline,
-        
-        "delivery_fee": db_order.distance_charge, # What you pay the driver
-        "requirements": {
-            "order_type": db_order.order_type,
-            "parcel_type": db_order.parcel_type,
-            "weight_kg": db_order.weight_kg,
-            "item_count": db_order.item_count,
-            "instructions": db_order.instructions
-        }
+    # 1. Import inside the function to prevent circular import crashes
+    from routes.drivers import driver_ws_manager
+
+    # 1. We must import FastAPI's JSON encoder to safely convert the DB row
+    from fastapi.encoders import jsonable_encoder
+    from schemas.customer_order import CustomerOrderRead
+
+    # 2. Convert the entire DB object into a perfect JSON dictionary
+    # (This makes it perfectly match what Flutter gets in HTTP requests!)
+    perfect_job_dict = jsonable_encoder(CustomerOrderRead.model_validate(db_order))
+
+    # 3. Build the exact structure dispatch_job_service.dart expects
+    popup_payload = {
+        "event": "NEW_JOB",
+        "job": perfect_job_dict,
     }
 
-    # In the monolith we no longer post to an external Driver Hub.
-    # The driver app will query `/drivers/jobs/available` and accept jobs directly.
+    background_tasks.add_task(driver_ws_manager.broadcast, popup_payload)
 
     return db_order
 
@@ -287,6 +280,48 @@ def get_my_active_order(
     )
 
     return active_order
+
+
+@router.get("/me/history", response_model=List[CustomerOrderRead])
+def get_my_order_history(
+    skip: int = 0,
+    limit: int = 10,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    history = (
+        db.query(CustomerOrder)
+        .filter(CustomerOrder.user_id == current_user.id)
+        .order_by(CustomerOrder.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return history
+
+
+@router.get("/me/transactions", response_model=List[PaymentRead])
+def get_my_transactions(
+    skip: int = 0,
+    limit: int = 10,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    Payment = __import__("models.payment", fromlist=["Payment"]).Payment
+
+    transactions = (
+        db.query(Payment)
+        .filter(Payment.user_id == current_user.id)
+        .order_by(Payment.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return transactions
 
 
 @router.get("/{order_id}", response_model=CustomerOrderRead)
