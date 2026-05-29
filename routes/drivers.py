@@ -1164,9 +1164,11 @@ def lift_driver_suspension(driver_id: str):
     driver_id_str = str(driver_id)
 
     ban_key = f"ban:driver:{driver_id_str}"
+    new_ban_key = f"banned:driver:{driver_id_str}"
     history_key = f"cancellations:driver:{driver_id_str}"
 
     r.delete(ban_key)
+    r.delete(new_ban_key)
     r.delete(history_key)
 
     return {

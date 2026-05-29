@@ -392,99 +392,109 @@ def cancel_order(
     user_id: str = Query(...),
     db: Session = Depends(get_db),
 ):
-    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+    try:
+        CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
 
-    db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
-    if not db_order:
-        raise HTTPException(status_code=404, detail="Order not found")
+        db_order = db.query(CustomerOrder).filter(CustomerOrder.id == order_id).first()
+        if not db_order:
+            raise HTTPException(status_code=404, detail="Order not found")
 
-    if db_order.status.upper() in ["ARRIVED", "PICKED_UP", "ON_THE_WAY", "EN_ROUTE", "DELIVERED", "COMPLETED"]:
-        raise HTTPException(status_code=403, detail="Driver has arrived or order is in progress. Cannot cancel now.")
+        if db_order.status.upper() in ["ARRIVED", "PICKED_UP", "ON_THE_WAY", "EN_ROUTE", "DELIVERED", "COMPLETED"]:
+            raise HTTPException(status_code=403, detail="Driver has arrived or order is in progress. Cannot cancel now.")
 
-    # 1. THE SHIELD: Translate Firebase UID to Database UUID safely
-    resolved_user_id = str(user_id)
-    if user_type == "driver":
-        DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
-        driver = db.query(DriverModel).filter(DriverModel.firebase_uid == user_id).first()
-        if not driver and len(user_id) == 36 and "-" in user_id:
-            driver = db.query(DriverModel).filter(DriverModel.id == user_id).first()
-        if driver:
-            resolved_user_id = str(driver.id)
-
-        # Check if they are already banned
-        is_banned, msg = PlatformGuard.check_ban(resolved_user_id)
-        if is_banned:
-            raise HTTPException(status_code=403, detail=msg)
-
-    # 2. THE BOUNCE & BLACKLIST: Free the order!
-    if user_type == "driver":
-        # Add to Driver's Redis Blacklist (expires in 24h)
-        rejected_key = f"rejected:driver:{resolved_user_id}"
-        r.sadd(rejected_key, order_id)
-        r.expire(rejected_key, 86400)
-
-        # Release job back to map
-        db_order.status = "PENDING"
-        db_order.assigned_driver_id = None
-        db_order.assigned_driver_name = None
-        db_order.assigned_driver_phone = None
-
-        # 🚨 FIRE THE WEBSOCKET TO THE CUSTOMER!
-        background_tasks.add_task(
-            parcel_ws_manager.broadcast_to_order,
-            order_id,
-            {
-                "event": "DRIVER_CANCELLED",
-                "status": "PENDING",
-                "message": "Driver unassigned. Finding a new delivery partner...",
-            },
-        )
-    else:
-        # Customer cancelled
-        db_order.status = "CANCELLED"
-        background_tasks.add_task(
-            parcel_ws_manager.broadcast_to_order,
-            order_id,
-            {"event": "CUSTOMER_CANCELLED", "status": "CANCELLED"},
-        )
-
-        if db_order.assigned_driver_id:
-            from routes.drivers import driver_ws_manager
-
+        # 1. THE SHIELD: Translate Firebase UID to Database UUID safely
+        resolved_user_id = str(user_id)
+        if user_type == "driver":
             DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
-            assigned_driver = (
-                db.query(DriverModel)
-                .filter(DriverModel.id == db_order.assigned_driver_id)
-                .first()
+            driver = db.query(DriverModel).filter(DriverModel.firebase_uid == user_id).first()
+            if not driver and len(user_id) == 36 and "-" in user_id:
+                driver = db.query(DriverModel).filter(DriverModel.id == user_id).first()
+            if driver:
+                resolved_user_id = str(driver.id)
+
+            # Check if they are already banned
+            is_banned, msg = PlatformGuard.check_ban(resolved_user_id)
+            if is_banned:
+                raise HTTPException(status_code=403, detail=msg)
+
+        # 2. ALWAYS FREE THE ORDER FIRST
+        if user_type == "driver":
+            # Add to Driver's Redis Blacklist (expires in 24h)
+            rejected_key = f"rejected:driver:{resolved_user_id}"
+            r.sadd(rejected_key, order_id)
+            r.expire(rejected_key, 86400)
+
+            # Release job back to map
+            db_order.status = "PENDING"
+            db_order.assigned_driver_id = None
+            db_order.assigned_driver_name = None
+            db_order.assigned_driver_phone = None
+
+            # Save the freed order immediately.
+            db.commit()
+
+            # 🚨 FIRE THE WEBSOCKET TO THE CUSTOMER!
+            background_tasks.add_task(
+                parcel_ws_manager.broadcast_to_order,
+                order_id,
+                {
+                    "event": "DRIVER_CANCELLED",
+                    "status": "PENDING",
+                    "message": "Driver unassigned. Finding a new delivery partner...",
+                },
+            )
+        else:
+            # Customer cancelled
+            db_order.status = "CANCELLED"
+            db.commit()
+
+            background_tasks.add_task(
+                parcel_ws_manager.broadcast_to_order,
+                order_id,
+                {"event": "CUSTOMER_CANCELLED", "status": "CANCELLED"},
             )
 
-            if assigned_driver:
-                background_tasks.add_task(
-                    driver_ws_manager.send_personal_message,
-                    assigned_driver.firebase_uid,
-                    {
-                        "event": "CUSTOMER_CANCELLED",
-                        "status": "CANCELLED",
-                        "order_id": order_id,
-                    },
+            if db_order.assigned_driver_id:
+                from routes.drivers import driver_ws_manager
+
+                DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
+                assigned_driver = (
+                    db.query(DriverModel)
+                    .filter(DriverModel.id == db_order.assigned_driver_id)
+                    .first()
                 )
 
-    db.commit()
+                if assigned_driver:
+                    background_tasks.add_task(
+                        driver_ws_manager.send_personal_message,
+                        assigned_driver.firebase_uid,
+                        {
+                            "event": "CUSTOMER_CANCELLED",
+                            "status": "CANCELLED",
+                            "order_id": order_id,
+                        },
+                    )
 
-    # 3. THE PUNISHMENT: Check limits and ban if needed
-    limit = 2 if user_type == "driver" else 4
-    can_cancel = PlatformGuard.attempt_cancellation(user_type, resolved_user_id, limit)
+        # 3. NOW HANDLE THE DRIVER PENALTY
+        limit = 2 if user_type == "driver" else 4
+        can_cancel = PlatformGuard.attempt_cancellation(user_type, resolved_user_id, limit)
 
-    if not can_cancel:
-        if user_type == "driver":
-            raise HTTPException(status_code=403, detail="Limit reached! Account suspended for 24 hours.")
-        else:
-            raise HTTPException(
-                status_code=403,
-                detail="Daily cancellation limit reached. Try again tomorrow.",
-            )
+        if not can_cancel:
+            if user_type == "driver":
+                raise HTTPException(status_code=403, detail="Limit reached! Account suspended for 24 hours.")
+            else:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Daily cancellation limit reached. Try again tomorrow.",
+                )
 
-    return {"status": "success", "message": "Order cancelled successfully"}
+        return {"status": "success", "message": "Order cancelled successfully"}
+
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        return {"status": 500, "message": "Internal server error during cancellation."}
 
 
 @router.post("/customers/{customer_id}/unsuspend")
@@ -492,9 +502,12 @@ def lift_customer_suspension(customer_id: str):
     customer_id_str = str(customer_id)
 
     ban_key = f"ban:customer:{customer_id_str}"
+    new_ban_key = f"banned:customer:{customer_id_str}"
     history_key = f"cancellations:customer:{customer_id_str}"
 
+    # Remove both legacy and new ban keys plus history
     r.delete(ban_key)
+    r.delete(new_ban_key)
     r.delete(history_key)
 
     return {
