@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from collections import defaultdict
 import hashlib
 import json
 import os
@@ -957,6 +958,79 @@ def available_jobs(
     query = query.order_by(distance_expr.asc())
 
     return query.offset(skip).limit(limit).all()
+
+
+@router.get("/jobs/available/area-wise")
+def available_jobs_area_wise(
+    accepts_rides: bool = Query(True, description="Flutter toggle for passenger rides"),
+    accepts_parcels: bool = Query(True, description="Flutter toggle for parcel deliveries"),
+    accepts_medicine: bool = Query(True, description="Flutter toggle for medicine"),
+    current_driver=Depends(get_current_driver),
+    db: Session = Depends(get_db),
+):
+    driver_id_str = str(current_driver.id)
+    is_banned, msg = PlatformGuard.check_ban(driver_id_str)
+    if is_banned:
+        raise HTTPException(status_code=403, detail=msg)
+
+    CustomerOrder = __import__("models.customer_order", fromlist=["CustomerOrder"]).CustomerOrder
+
+    raw_vehicle_type = current_driver.vehicle_type
+    sanitized_vehicle = raw_vehicle_type.lower() if raw_vehicle_type else ""
+
+    allowed_vehicle_types = []
+    if accepts_rides:
+        allowed_vehicle_types.append(sanitized_vehicle)
+    if accepts_parcels:
+        allowed_vehicle_types.append(f"parcel_{sanitized_vehicle}")
+    if accepts_medicine:
+        allowed_vehicle_types.append(f"medicine_{sanitized_vehicle}")
+
+    if not allowed_vehicle_types:
+        return {"success": True, "data": []}
+
+    rejected_key = f"rejected:driver:{driver_id_str}"
+    rejected_ids = list(r.smembers(rejected_key) or [])
+
+    query = db.query(CustomerOrder).filter(
+        func.lower(CustomerOrder.status) == "pending",
+        CustomerOrder.assigned_driver_id.is_(None),
+        CustomerOrder.vehicle_type.in_(allowed_vehicle_types),
+    )
+
+    if rejected_ids:
+        query = query.filter(CustomerOrder.id.notin_(rejected_ids))
+
+    available_orders = query.all()
+
+    grouped_orders = defaultdict(list)
+    for order in available_orders:
+        area_name = getattr(order, "pickup_area", None) or "Unknown Area"
+        grouped_orders[area_name].append(
+            {
+                "id": order.id,
+                "order_type": order.order_type,
+                "pickup_address": order.pickup_address,
+                "drop_address": order.drop_address,
+                "total_fare": order.total_fare,
+                "distance_km": order.distance_km,
+                "estimated_time_mins": order.estimated_time_mins,
+                "payment_method": order.payment_method,
+            }
+        )
+
+    response_data = [
+        {
+            "area_name": area,
+            "order_count": len(orders),
+            "orders": orders,
+        }
+        for area, orders in grouped_orders.items()
+    ]
+
+    response_data.sort(key=lambda x: x["order_count"], reverse=True)
+
+    return {"success": True, "data": response_data}
 
 
 @router.put("/jobs/{order_id}/status")
