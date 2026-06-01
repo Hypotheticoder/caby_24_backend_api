@@ -515,7 +515,7 @@ flowchart LR
 The container entrypoint:
 
 1. Runs `alembic upgrade head`
-2. Starts Uvicorn on port `8017`
+2. Starts Uvicorn on port `8019`
 
 See `Dockerfile`.
 
@@ -525,7 +525,7 @@ See `Dockerfile`.
 
 - Postgres 15 (`db`)
 - pgAdmin (`pgadmin`, exposed on `8018`)
-- backend (`backend`, exposed on `8017`)
+- backend (`backend`, exposed on `8019`)
 
 ---
 
