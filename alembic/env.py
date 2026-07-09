@@ -18,6 +18,7 @@ import models.earnings_config
 import models.driver
 import models.global_timing
 import models.service_type
+import models.legal_document
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
