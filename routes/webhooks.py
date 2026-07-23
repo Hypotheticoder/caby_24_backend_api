@@ -1,4 +1,5 @@
 import os
+import requests
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
@@ -43,5 +44,22 @@ async def webhook_driver_assigned(
 
     db.commit()
     db.refresh(db_order)
+
+    # Step 4: Forward the webhook to Medy Backend
+    medy_webhook_url = os.getenv("MEDY_WEBHOOK_URL", "http://127.0.0.1:8000/api/rest/orders/webhook/caby-driver-update")
+    medy_payload = {
+        "caby_order_id": payload.external_order_id,
+        "driver_id": payload.driver_id,
+        "driver_name": payload.driver_name,
+        "driver_phone": payload.driver_phone,
+        "pickup_otp": db_order.pickup_otp,
+        "drop_otp": db_order.drop_otp,
+        "delivery_fee": db_order.total_fare
+    }
+    try:
+        medy_response = requests.post(medy_webhook_url, json=medy_payload, timeout=3)
+        print(f"Forwarded webhook to Medy: {medy_response.status_code} {medy_response.text}")
+    except Exception as e:
+        print(f"WEBHOOK ERROR: Failed to forward to Medy: {e}")
 
     return {"status": "success", "message": "Customer DB updated successfully"}

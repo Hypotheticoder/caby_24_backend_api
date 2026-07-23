@@ -832,6 +832,27 @@ def accept_job(
         },
     )
 
+    # Forward the driver assignment to Medy Backend
+    medy_webhook_url = os.getenv("MEDY_WEBHOOK_URL", "http://127.0.0.1:8000/api/rest/orders/webhook/caby-driver-update")
+    medy_payload = {
+        "caby_order_id": order_id,
+        "driver_id": str(updated_order.assigned_driver_id),
+        "driver_name": updated_order.assigned_driver_name,
+        "driver_phone": updated_order.assigned_driver_phone,
+        "pickup_otp": updated_order.pickup_otp,
+        "drop_otp": updated_order.drop_otp,
+        "delivery_fee": updated_order.total_fare
+    }
+    
+    def fire_webhook():
+        try:
+            import requests
+            requests.post(medy_webhook_url, json=medy_payload, timeout=3)
+        except Exception as e:
+            print(f"WEBHOOK ERROR: Failed to forward to Medy: {e}")
+
+    background_tasks.add_task(fire_webhook)
+
     return {
         "message": "Job accepted",
         "order_id": order_id,
@@ -1127,6 +1148,23 @@ def update_job_status(
         order_id,
         {"event": "status_update", "status": new_status},
     )
+    
+    def notify_medy_backend():
+        import requests
+        medy_webhook_url = os.getenv("MEDY_WEBHOOK_URL", "http://127.0.0.1:8000/api/rest/orders/webhook/caby-driver-update")
+        medy_payload = {
+            "caby_order_id": str(db_order.id),
+            "driver_id": str(current_driver.id),
+            "driver_name": current_driver.name,
+            "driver_phone": current_driver.phone,
+            "status": new_status,
+        }
+        try:
+            requests.post(medy_webhook_url, json=medy_payload, timeout=3)
+        except Exception as e:
+            print(f"WEBHOOK ERROR: Failed to forward status {new_status} to Medy: {e}")
+
+    background_tasks.add_task(notify_medy_backend)
 
     return {"message": "status updated", "order_id": order_id, "status": new_status}
 
