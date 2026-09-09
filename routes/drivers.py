@@ -52,6 +52,37 @@ from schemas.transaction import (
     PieSlice,
     TransactionRead,
 )
+from schemas.driver import OTPRequest, OTPVerify, Token
+
+from core.otp import generate_and_save_otp, verify_otp
+from core.security import create_access_token, verify_access_token
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer(auto_error=False)
+
+def get_current_driver(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db)
+):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    
+    token = credentials.credentials
+    payload = verify_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+    phone_number = payload.get("sub")
+    if not phone_number:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    driver = crud_driver.get_driver_by_phone(db, phone_number)
+    if not driver:
+        raise HTTPException(
+            status_code=404,
+            detail="Driver profile not found.",
+        )
+    return driver
 
 from api.websockets.parcel_ws import parcel_ws_manager
 from routes.customer_orders import is_currently_peak_time
@@ -97,24 +128,44 @@ class DriverGlobalWSManager:
 driver_ws_manager = DriverGlobalWSManager()
 
 
+@router.post("/login/request-otp")
+def request_otp(payload: OTPRequest):
+    # Generates a random OTP or a fixed one for the demo account
+    otp = generate_and_save_otp(payload.phone_number)
+    # TODO: Integrate with SMS gateway here
+    print(f"DEBUG: Sent OTP {otp} to {payload.phone_number}")
+    return {"message": "OTP sent successfully"}
+
+@router.post("/login/verify-otp", response_model=Token)
+def verify_otp_route(payload: OTPVerify, db: Session = Depends(get_db)):
+    if not verify_otp(payload.phone_number, payload.otp):
+        raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+    
+    driver = crud_driver.get_driver_by_phone(db, payload.phone_number)
+    if not driver:
+        # Auto-create profile if doesn't exist
+        driver_create = DriverCreate(
+            phone_number=payload.phone_number,
+            firebase_uid=str(uuid.uuid4())  # Placeholder since we don't use Firebase anymore
+        )
+        driver = create_driver(db, driver_create)
+    
+    access_token = create_access_token({"sub": driver.phone_number, "role": "driver"})
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @router.post("/create", response_model=DriverRead, status_code=status.HTTP_201_CREATED)
 def create_driver_route(
     payload: DriverCreate,
-    decoded_token: dict = Depends(verify_firebase_token),
     db: Session = Depends(get_db),
 ):
-    uid = decoded_token.get("uid")
-    if not uid:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
-    # Set firebase_uid from auth token so client doesn't control it
+    # Overriding create driver to skip Firebase requirement entirely.
     if hasattr(payload, "model_copy"):
-        payload = payload.model_copy(update={"firebase_uid": uid})
+        payload = payload.model_copy(update={"firebase_uid": str(uuid.uuid4())})
     else:
-        payload = payload.copy(update={"firebase_uid": uid})
+        payload = payload.copy(update={"firebase_uid": str(uuid.uuid4())})
 
     driver = create_driver(db, payload)
-    ensure_driver_upload_dir(driver.name, driver.firebase_uid)
+    ensure_driver_upload_dir(driver.name or "driver", driver.firebase_uid)
     return driver
 
 
@@ -138,6 +189,15 @@ def driver_phone_exists(
     return {"exists": False}
 
 
+@router.get("/me", response_model=DriverRead)
+def get_my_driver_profile(current_driver=Depends(get_current_driver)):
+    """
+    Flutter calls this when the app opens to load their profile.
+    It automatically decrypts the token and returns the Driver row.
+    """
+    return current_driver
+
+
 @router.get("/{driver_id}", response_model=DriverRead)
 def get_driver_route(driver_id: str, db: Session = Depends(get_db)):
     driver = get_driver(db, driver_id)
@@ -150,22 +210,15 @@ def get_driver_route(driver_id: str, db: Session = Depends(get_db)):
 def patch_driver_route(
     driver_id: str,
     payload: DriverUpdate,
-    firebase_user: dict = Depends(verify_raw_firebase_token),
+    current_driver = Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
     driver = get_driver(db, driver_id)
     if driver is None:
         raise HTTPException(status_code=404, detail="Driver not found")
 
-    token_phone = firebase_user.get("phone_number") or firebase_user.get("phone")
-    driver_phone = str(driver.phone_number or "").strip()
-    token_phone = str(token_phone or "").strip()
-
-    if not token_phone or not driver_phone:
-        raise HTTPException(status_code=403, detail="Phone number mismatch. Cannot hijack account.")
-
-    if token_phone not in driver_phone and driver_phone not in token_phone:
-        raise HTTPException(status_code=403, detail="Phone number mismatch. Cannot hijack account.")
+    if driver.id != current_driver.id:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this profile")
 
     return update_driver(db, driver, payload)
 
@@ -173,14 +226,14 @@ def patch_driver_route(
 @router.delete("/{driver_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_driver_route(
     driver_id: str,
-    decoded_token: dict = Depends(verify_firebase_token),
+    current_driver = Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
     driver = get_driver(db, driver_id)
     if driver is None:
         raise HTTPException(status_code=404, detail="Driver not found")
 
-    if driver.firebase_uid != decoded_token.get("uid"):
+    if driver.id != current_driver.id:
         raise HTTPException(status_code=403, detail="Not authorized to modify this profile")
 
     delete_driver(db, driver)
@@ -192,14 +245,14 @@ async def upload_driver_document(
     driver_id: str,
     doc_type: str,
     file: UploadFile = File(...),
-    decoded_token: dict = Depends(verify_firebase_token),
+    current_driver = Depends(get_current_driver),
     db: Session = Depends(get_db),
 ):
     driver = get_driver(db, driver_id)
     if driver is None:
         raise HTTPException(status_code=404, detail="Driver not found")
 
-    if driver.firebase_uid != decoded_token.get("uid"):
+    if driver.id != current_driver.id:
         raise HTTPException(status_code=403, detail="Not authorized to modify this profile")
 
     field_map = {
@@ -228,28 +281,8 @@ async def upload_driver_document(
     return {"doc_type": doc_type, "url": url_path}
 
 
-def get_current_driver(decoded_token: dict = Depends(verify_firebase_token), db: Session = Depends(get_db)):
-    uid = decoded_token.get("uid")
-    if not uid:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-    # Find the driver profile for this firebase uid
-    DriverModel = __import__("models.driver", fromlist=["Driver"]).Driver
-    driver = db.query(DriverModel).filter(DriverModel.firebase_uid == uid).first()
-    if not driver:
-        raise HTTPException(
-            status_code=404,
-            detail="Driver profile not found. Call POST /drivers/create first.",
-        )
-    return driver
 
 
-@router.get("/me", response_model=DriverRead)
-def get_my_driver_profile(current_driver=Depends(get_current_driver)):
-    """
-    Flutter calls this when the app opens to load their profile.
-    It automatically decrypts the token and returns the Driver row.
-    """
-    return current_driver
 
 
 @router.post("/me/logout")

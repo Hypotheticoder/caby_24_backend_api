@@ -9,4 +9,5 @@ requests
 httpx
 firebase-admin
 python-multipart
-redis
+redispython-jose[cryptography]
+python-jose[cryptography]
